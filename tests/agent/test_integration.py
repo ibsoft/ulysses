@@ -240,6 +240,22 @@ def test_orchestrator_plans_nmap_os_version_then_summarizes(tmp_path):
     assert "$ nmap -O 192.168.7.33" in provider.calls[-1][-1]["content"]
 
 
+def test_report_from_tool_result_requests_assessment_report_structure(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    provider = RecordingProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+
+    agent.answer_from_tool_result("make me a report for assessed system", "nmap output")
+
+    prompt = provider.calls[-1][-1]["content"]
+    assert "severity-ranked findings table" in prompt
+    assert "technical proof of concept" in prompt
+    assert "detailed remediation" in prompt
+    assert "Do not invent vulnerabilities" in prompt
+
+
 def test_orchestrator_reports_activity_during_tool_call(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")

@@ -322,7 +322,11 @@ class AgentOrchestrator:
                         f"User request:\n{user_request}\n\n"
                         f"Tool output:\n{tool_result}\n\n"
                         "Answer the user's request using the tool output. If they asked for a report, "
-                        "format the answer as Markdown."
+                        "format the answer as Markdown. For assessed systems, produce a vulnerability assessment report "
+                        "with this structure: title, scope, executive summary, methodology, severity-ranked findings table, "
+                        "detailed findings, technical proof of concept, evidence, impact, detailed remediation, verification "
+                        "steps, and assumptions or limitations. Rank findings Critical, High, Medium, Low, Informational. "
+                        "Do not invent vulnerabilities that are not supported by the tool output."
                     ),
                 },
             ],
