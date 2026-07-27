@@ -55,11 +55,16 @@ scripts/install-ulysses-linux
 The installer creates:
 
 ```text
+~/.ulysses/app
+~/.ulysses/app/models
 ~/.ulysses/venv
 ~/.config/ulysses/ulysses.yaml
 ~/.config/ulysses/env
 ~/.local/bin/ulysses
 ```
+
+Sirina model files are downloaded during install when they are missing or invalid.
+Runtime state under `~/.ulysses/app/var/ulysses` starts empty for each install, including sessions, FAISS memory, metadata, and logs.
 
 Set your API key in `~/.config/ulysses/env`:
 
@@ -144,6 +149,13 @@ Run with OpenAI:
 export OPENAI_API_KEY=your_api_key_here
 ulysses --config config/ulysses.yaml
 ```
+
+Provider setup is available inside the TUI with `F7` or `/setup`. It can save and activate:
+
+- OpenAI: `https://api.openai.com/v1`, key env `OPENAI_API_KEY`
+- Kimi / Moonshot: `https://api.moonshot.ai/v1`, key env `KIMI_API_KEY`
+- Local Ollama: `http://localhost:11434/v1`, no real API key required
+- OAuth-compatible OpenAI-style providers: custom base URL and token env
 
 Use an OpenAI-compatible provider by setting `llm.provider`, `llm.base_url`, and token/key settings in `config/ulysses.yaml` or with `ULYSSES__...` environment overrides.
 

@@ -2,11 +2,19 @@
 set -euo pipefail
 
 APP_HOME="${HOME}/.ulysses"
+APP_SOURCE="${APP_HOME}/app"
+MODEL_HOME="${APP_SOURCE}/models"
 CONFIG_HOME="${HOME}/.config/ulysses"
 BIN_HOME="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+if [[ -z "${PYTHON_BIN:-}" ]]; then
+  if command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.11"
+  else
+    PYTHON_BIN="python3"
+  fi
+fi
 
 spin() {
   local pid="$1"
@@ -28,7 +36,45 @@ step() {
 step "Creating Ulysses directories in ${HOME}"
 mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
 
+step "Copying Ulysses files to ${APP_SOURCE}"
+if [[ "${PROJECT_ROOT}" != "${APP_SOURCE}" ]]; then
+  MODEL_BACKUP=""
+  if [[ -d "${APP_SOURCE}/models" ]]; then
+    MODEL_BACKUP="${APP_HOME}/.models.backup.$$"
+    rm -rf "${MODEL_BACKUP}"
+    mv "${APP_SOURCE}/models" "${MODEL_BACKUP}"
+  fi
+  rm -rf "${APP_SOURCE}"
+  mkdir -p "${APP_SOURCE}"
+  cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"
+  if [[ -n "${MODEL_BACKUP}" ]]; then
+    rm -rf "${APP_SOURCE}/models"
+    mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
+  fi
+fi
+rm -rf "${APP_SOURCE}/var/ulysses"
+mkdir -p "${APP_SOURCE}/var/ulysses/logs"
+
+if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+  printf "error: Python executable not found: %s\n" "${PYTHON_BIN}" >&2
+  exit 1
+fi
+
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  printf "error: Ulysses requires Python 3.11 or newer, but %s is " "${PYTHON_BIN}" >&2
+  "${PYTHON_BIN}" --version >&2
+  printf "\nInstall Python 3.11+, or rerun with PYTHON_BIN=/path/to/python3.11 %s\n" "$0" >&2
+  exit 1
+fi
+
 step "Creating virtual environment"
+if [[ -x "${APP_HOME}/venv/bin/python" ]] &&
+  ! "${APP_HOME}/venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  printf "error: existing virtual environment uses " >&2
+  "${APP_HOME}/venv/bin/python" --version >&2
+  printf "\nRemove %s/venv and rerun the installer with Python 3.11 or newer.\n" "${APP_HOME}" >&2
+  exit 1
+fi
 "${PYTHON_BIN}" -m venv "${APP_HOME}/venv" &
 spin "$!" "virtual environment ready"
 
@@ -36,21 +82,34 @@ step "Upgrading pip"
 "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip &
 spin "$!" "pip upgraded"
 
-step "Installing Ulysses from current checkout"
-"${APP_HOME}/venv/bin/python" -m pip install -e "${PROJECT_ROOT}[agent]" &
+step "Installing Ulysses from copied files"
+"${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]" &
 spin "$!" "Ulysses installed"
+
+step "Checking Sirina models"
+if "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" check-models --group all >/dev/null 2>&1; then
+  printf "[ok] Sirina models ready\n"
+else
+  "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all &
+  spin "$!" "Sirina models downloaded"
+fi
 
 step "Writing default configuration"
 if [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
-  cp "${PROJECT_ROOT}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+  cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
 fi
 if [[ ! -f "${CONFIG_HOME}/env" ]]; then
-  cp "${PROJECT_ROOT}/.env.example" "${CONFIG_HOME}/env"
+  cp "${APP_SOURCE}/.env.example" "${CONFIG_HOME}/env"
   chmod 600 "${CONFIG_HOME}/env"
 fi
+if grep -q '^SIRINA_MODEL_DIR=' "${CONFIG_HOME}/env"; then
+  sed -i "s|^SIRINA_MODEL_DIR=.*|SIRINA_MODEL_DIR=${MODEL_HOME}|" "${CONFIG_HOME}/env"
+else
+  printf "\nSIRINA_MODEL_DIR=%s\n" "${MODEL_HOME}" >>"${CONFIG_HOME}/env"
+fi
 mkdir -p "${CONFIG_HOME}/prompts"
-if [[ -f "${PROJECT_ROOT}/prompts/ulysses_system.md" && ! -f "${CONFIG_HOME}/prompts/ulysses_system.md" ]]; then
-  cp "${PROJECT_ROOT}/prompts/ulysses_system.md" "${CONFIG_HOME}/prompts/ulysses_system.md"
+if [[ -f "${APP_SOURCE}/prompts/ulysses_system.md" && ! -f "${CONFIG_HOME}/prompts/ulysses_system.md" ]]; then
+  cp "${APP_SOURCE}/prompts/ulysses_system.md" "${CONFIG_HOME}/prompts/ulysses_system.md"
 fi
 
 step "Creating launcher"
@@ -59,7 +118,8 @@ cat >"${BIN_HOME}/ulysses" <<EOF
 set -a
 [[ -f "${CONFIG_HOME}/env" ]] && source "${CONFIG_HOME}/env"
 set +a
-cd "${PROJECT_ROOT}"
+export SIRINA_MODEL_DIR="${MODEL_HOME}"
+cd "${APP_SOURCE}"
 exec "${APP_HOME}/venv/bin/ulysses" --config "${CONFIG_HOME}/ulysses.yaml" "\$@"
 EOF
 chmod +x "${BIN_HOME}/ulysses"
@@ -68,6 +128,8 @@ cat <<EOF
 
 Ulysses installed for the current user.
 
+App:     ${APP_SOURCE}
+Models:  ${MODEL_HOME}
 Config:  ${CONFIG_HOME}/ulysses.yaml
 Env:     ${CONFIG_HOME}/env
 Command: ${BIN_HOME}/ulysses

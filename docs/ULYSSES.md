@@ -74,11 +74,16 @@ scripts/install-ulysses-linux
 This creates:
 
 ```text
+~/.ulysses/app
+~/.ulysses/app/models
 ~/.ulysses/venv
 ~/.config/ulysses/ulysses.yaml
 ~/.config/ulysses/env
 ~/.local/bin/ulysses
 ```
+
+Sirina model files are downloaded during install when they are missing or invalid.
+Runtime state under `~/.ulysses/app/var/ulysses` starts empty for each install, including sessions, FAISS memory, metadata, and logs.
 
 Set `OPENAI_API_KEY` in `~/.config/ulysses/env`, then run:
 
@@ -107,7 +112,7 @@ python -m pip install -e ".[wakeword]"
 
 Without that extra, Ulysses still runs text-only and Sirina VAD/push-to-talk style voice flows.
 
-Set `OPENAI_API_KEY` in your shell or `.env` loader. To use an officially supported OpenAI-compatible OAuth provider, set `llm.provider: oauth_compatible`, `llm.base_url`, and either an OAuth token environment variable or OS keyring service details. Ulysses does not scrape browser tokens or bypass authentication controls.
+Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup` inside the TUI. Provider setup supports OpenAI, Kimi / Moonshot, local Ollama, and OAuth-compatible OpenAI-style providers. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key. Ulysses does not scrape browser tokens or bypass authentication controls.
 
 Run text-only:
 

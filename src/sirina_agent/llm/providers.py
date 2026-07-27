@@ -66,10 +66,13 @@ class MockProvider:
 def build_provider(config) -> LLMProvider:
     if config.provider == "mock":
         return MockProvider()
-    if config.provider == "openai":
+    if config.provider in {"openai", "kimi"}:
         api_key = os.getenv(config.api_key_env)
         if not api_key:
-            raise RuntimeError(f"{config.api_key_env} is required for OpenAI provider")
+            raise RuntimeError(f"{config.api_key_env} is required for {config.provider} provider")
+        return OpenAICompatibleProvider(config.base_url, config.model, api_key, config.timeout_seconds)
+    if config.provider == "ollama":
+        api_key = os.getenv(config.api_key_env) or "ollama"
         return OpenAICompatibleProvider(config.base_url, config.model, api_key, config.timeout_seconds)
     token = os.getenv(config.oauth_token_env or "")
     if not token and config.oauth_keyring_service and config.oauth_keyring_username:

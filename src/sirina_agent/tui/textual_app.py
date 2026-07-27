@@ -2,11 +2,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from itertools import cycle
+import shutil
+import subprocess
 from threading import Thread
+
+from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
+from sirina_agent.config import load_config
+from sirina_agent.config.provider_setup import (
+    ProviderSetup,
+    apply_provider_setup,
+    default_for,
+    env_path_for_config,
+    load_env_file,
+    provider_labels,
+)
+from sirina_agent.llm.providers import build_provider
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
+from textual.events import Paste
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
@@ -68,6 +83,93 @@ class SudoPasswordScreen(ModalScreen[str | None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
+
+
+class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
+    CSS = """
+    ProviderSetupScreen {
+        align: center middle;
+    }
+
+    #setup-dialog {
+        width: 76;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+
+    #setup-provider-buttons {
+        height: 3;
+        margin: 1 0;
+    }
+
+    #setup-actions {
+        height: 3;
+        margin-top: 1;
+    }
+
+    .setup-input {
+        margin-bottom: 1;
+    }
+    """
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.config = config
+        self.provider = config.llm.provider
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="setup-dialog"):
+            yield Label("Provider setup")
+            yield Static("Choose a provider, edit fields, then save. Secret fields are write-only.")
+            with Horizontal(id="setup-provider-buttons"):
+                for provider, label in provider_labels():
+                    yield Button(label, id=f"setup-provider-{provider}")
+            yield Label("Model")
+            yield Input(value=self.config.llm.model, id="setup-model", classes="setup-input")
+            yield Label("Base URL")
+            yield Input(value=self.config.llm.base_url, id="setup-base-url", classes="setup-input")
+            yield Label("API key environment variable")
+            yield Input(value=self.config.llm.api_key_env, id="setup-api-env", classes="setup-input")
+            yield Label("API key")
+            yield Input(password=True, placeholder="leave blank to keep existing key", id="setup-api-key", classes="setup-input")
+            yield Label("OAuth token environment variable")
+            yield Input(value=self.config.llm.oauth_token_env or "", id="setup-oauth-env", classes="setup-input")
+            yield Label("OAuth token")
+            yield Input(password=True, placeholder="leave blank to keep existing token", id="setup-oauth-token", classes="setup-input")
+            with Horizontal(id="setup-actions"):
+                yield Button("Save", variant="primary", id="setup-save")
+                yield Button("Cancel", id="setup-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "setup-save":
+            self.dismiss(
+                ProviderSetup(
+                    provider=self.provider,
+                    model=self.query_one("#setup-model", Input).value,
+                    base_url=self.query_one("#setup-base-url", Input).value,
+                    api_key_env=self.query_one("#setup-api-env", Input).value,
+                    api_key=self.query_one("#setup-api-key", Input).value,
+                    oauth_token_env=self.query_one("#setup-oauth-env", Input).value,
+                    oauth_token=self.query_one("#setup-oauth-token", Input).value,
+                )
+            )
+            return
+        if button_id == "setup-cancel":
+            self.dismiss(None)
+            return
+        prefix = "setup-provider-"
+        if button_id.startswith(prefix):
+            self._select_provider(button_id.removeprefix(prefix))
+
+    def _select_provider(self, provider: str) -> None:
+        self.provider = provider
+        self.query_one("#setup-model", Input).value = default_for(provider, "model")
+        self.query_one("#setup-base-url", Input).value = default_for(provider, "base_url")
+        self.query_one("#setup-api-env", Input).value = default_for(provider, "api_key_env")
+        self.query_one("#setup-oauth-env", Input).value = default_for(provider, "oauth_token_env")
 
 
 class UlyssesTextualApp(App):
@@ -139,12 +241,15 @@ class UlyssesTextualApp(App):
         Binding("ctrl+t", "cycle_theme", "Theme"),
         Binding("ctrl+u", "voice_toggle", "Voice"),
         Binding("ctrl+m", "mute_toggle", "Mute"),
-        Binding("ctrl+y", "copy_last", "Copy last"),
+        Binding("ctrl+v", "paste_clipboard", "Paste", show=False),
+        Binding("ctrl+y", "copy_selected_or_last", "Copy"),
         Binding("ctrl+shift+y", "copy_transcript", "Copy all"),
         Binding("ctrl+s", "selection_mode", "Select"),
         Binding("f2", "cycle_theme", "Theme"),
         Binding("f5", "status", "Status"),
         Binding("f6", "skills", "Skills"),
+        Binding("f7", "setup", "Setup"),
+        Binding("escape", "stop_speaking", "Stop voice", show=False),
     ]
 
     THEMES = ("ulysses_dark", "ulysses_light", "terminal")
@@ -160,13 +265,21 @@ class UlyssesTextualApp(App):
         super().__init__()
         self.orchestrator = orchestrator
         self.voice_io = voice_io
+        self.artifacts = ArtifactManager.from_config(orchestrator.config)
         self.last_assistant_text = ""
         self.transcript_plain: list[str] = []
+        self._last_user_text = ""
+        self._last_response_wants_report = False
         self.theme_name = getattr(orchestrator.config.tui, "theme", "ulysses_dark")
         self._waiting = False
+        self._speaking = False
+        self._speech_id = 0
+        self._activity_text = "thinking"
         self._spinner = cycle(self.SPINNER_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
+        if hasattr(self.orchestrator, "set_activity_callback"):
+            self.orchestrator.set_activity_callback(self._activity_from_worker)
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -183,14 +296,17 @@ class UlyssesTextualApp(App):
                 yield Static(
                     "Ctrl+U voice on/off\n"
                     "Ctrl+M mute\n"
-                    "Ctrl+Y copy last\n"
+                    "Ctrl+V paste\n"
+                    "Ctrl+Y copy selected/last\n"
                     "Ctrl+Shift+Y copy all\n"
+                    "Esc stop voice\n"
                     "Ctrl+S select mode\n"
                     "Ctrl+N new session\n"
                     "Ctrl+L clear\n"
                     "F2 theme\n"
                     "F5 status\n"
                     "F6 skills\n"
+                    "F7 setup\n"
                     "Ctrl+Q quit",
                     classes="muted",
                 )
@@ -207,7 +323,8 @@ class UlyssesTextualApp(App):
                     "/context\n"
                     "/sessions\n"
                     "/theme [name]\n"
-                    "/copy [all]\n"
+                    "/setup\n"
+                    "/copy [selected|all]\n"
                     "/select on|off\n"
                     "/quit",
                     classes="muted",
@@ -239,10 +356,50 @@ class UlyssesTextualApp(App):
         if text.startswith("/"):
             self._command(text)
             return
-        self._write_user(text)
+        original_text = text
+        text = self._submission_text_with_attachments(original_text)
+        self._last_user_text = original_text
+        self._last_response_wants_report = is_report_request(original_text)
+        self._write_user(original_text)
         self._refresh_status()
         self._start_waiting()
         Thread(target=self._answer_in_thread, args=(text,), daemon=True).start()
+
+    def on_paste(self, event: Paste) -> None:
+        if getattr(self.focused, "id", None) != "composer":
+            return
+        text = event.text
+        if not text:
+            return
+        if "\n" in text:
+            event.prevent_default()
+            event.stop()
+            self._insert_composer_text(text)
+
+    def action_paste_clipboard(self) -> None:
+        if getattr(self.focused, "id", None) != "composer":
+            self.query_one("#composer", Input).focus()
+        text = self._clipboard_text()
+        if not text:
+            self._write_system("Clipboard is empty or unavailable.")
+            return
+        self._insert_composer_text(text)
+
+    def _insert_composer_text(self, text: str) -> None:
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
+        self.query_one("#composer", Input).insert_text_at_cursor(normalized)
+
+    def _clipboard_text(self) -> str:
+        app_clipboard = str(self.clipboard or "")
+        system_clipboard = _system_clipboard_text()
+        return system_clipboard or app_clipboard
+
+    def _submission_text_with_attachments(self, text: str) -> str:
+        if should_store_large_paste(text, self.orchestrator.config.context.max_chars):
+            artifact = self.artifacts.save_text_attachment(self.orchestrator.session_id, text)
+            self._write_system(f"Large paste saved as text file:\n{artifact.path}")
+            return attachment_prompt(text, artifact)
+        return text
 
     def _answer_in_thread(self, text: str) -> None:
         try:
@@ -254,6 +411,10 @@ class UlyssesTextualApp(App):
 
     def _finish_answer(self, answer: str) -> None:
         self._stop_waiting()
+        if self._last_response_wants_report:
+            artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
+            answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
+            self._last_response_wants_report = False
         self._write_assistant(answer)
         self._refresh_status()
         self._speak(answer)
@@ -302,6 +463,8 @@ class UlyssesTextualApp(App):
             self._autonomous_command(parts)
         elif cmd in {"/status", "/config"}:
             self.action_status()
+        elif cmd == "/setup":
+            self.action_setup()
         elif cmd == "/context":
             self._write_system(str(self.orchestrator.context_usage()))
         elif cmd == "/voice":
@@ -320,8 +483,10 @@ class UlyssesTextualApp(App):
         elif cmd == "/copy":
             if len(parts) > 1 and parts[1] == "all":
                 self.action_copy_transcript()
+            elif len(parts) > 1 and parts[1] == "selected":
+                self.action_copy_selected()
             else:
-                self.action_copy_last()
+                self.action_copy_selected_or_last()
         elif cmd == "/select":
             if len(parts) > 1 and parts[1].lower() in {"on", "off"}:
                 self._set_selection_mode(parts[1].lower() == "on")
@@ -351,7 +516,9 @@ class UlyssesTextualApp(App):
             self._write_system("Voice responses: on")
         elif parts[1].lower() == "off":
             self.voice_io.state.enabled = False
+            self._speech_id += 1
             self.voice_io.interrupt()
+            self._stop_speaking_ui()
             self._write_system("Voice responses: off")
         else:
             self._write_system("Usage: /voice, /voice on, or /voice off")
@@ -398,13 +565,45 @@ class UlyssesTextualApp(App):
             lines.append(f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}")
         self._write_system("\n".join(lines) or "No skills registered.")
 
+    def action_setup(self) -> None:
+        self.push_screen(ProviderSetupScreen(self.orchestrator.config), self._finish_provider_setup)
+
+    def _finish_provider_setup(self, setup: ProviderSetup | None) -> None:
+        if setup is None:
+            self._write_system("Provider setup cancelled.")
+            return
+        config_path = self.orchestrator.config_path
+        try:
+            apply_provider_setup(self.orchestrator.config, config_path, setup)
+            load_env_file(env_path_for_config(config_path))
+            self.orchestrator.config = load_config(config_path)
+        except Exception as exc:
+            self._write_error(f"Provider setup failed: {exc}")
+            self._refresh_status()
+            return
+        try:
+            self.orchestrator.llm = build_provider(self.orchestrator.config.llm)
+        except Exception as exc:
+            self._write_error(f"Provider saved, but activation failed: {exc}")
+            self._refresh_status()
+            return
+        self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
+        self._write_system(
+            "Provider saved and activated:\n"
+            f"{self.orchestrator.config.llm.provider} / {self.orchestrator.config.llm.model}\n"
+            f"{self.orchestrator.config.llm.base_url}"
+        )
+        self._refresh_status()
+
     def action_voice_toggle(self) -> None:
         if not self.voice_io:
             self._write_system("Voice I/O is not active.")
             return
         self.voice_io.state.enabled = not self.voice_io.state.enabled
         if not self.voice_io.state.enabled:
+            self._speech_id += 1
             self.voice_io.interrupt()
+            self._stop_speaking_ui()
         self._write_system(f"Voice responses: {'on' if self.voice_io.state.enabled else 'off'}")
         self._refresh_status()
 
@@ -413,28 +612,63 @@ class UlyssesTextualApp(App):
             self._write_system("Voice I/O is not active.")
             return
         self.voice_io.state.muted = not self.voice_io.state.muted
+        if self.voice_io.state.muted:
+            self._speech_id += 1
+            self.voice_io.interrupt()
+            self._stop_speaking_ui()
         self._write_system(f"Muted: {self.voice_io.state.muted}")
         self._refresh_status()
+
+    def action_stop_speaking(self) -> None:
+        if not self.voice_io:
+            return
+        state = self.voice_io.state
+        if not self._speaking and state.tts != "speaking":
+            return
+        self._speech_id += 1
+        self.voice_io.interrupt()
+        self._stop_speaking_ui()
+        self._write_system("Stopped speaking.")
+        self._refresh_status()
+
+    def action_copy_selected_or_last(self) -> None:
+        selected = self._selected_text()
+        if selected:
+            self._copy_text(selected, "Copied selected text.")
+            return
+        self.action_copy_last()
+
+    def action_copy_selected(self) -> None:
+        selected = self._selected_text()
+        if not selected:
+            self._write_system("No selected text to copy.")
+            return
+        self._copy_text(selected, "Copied selected text.")
 
     def action_copy_last(self) -> None:
         if not self.last_assistant_text:
             self._write_system("No assistant response to copy.")
             return
-        try:
-            self.copy_to_clipboard(self.last_assistant_text)
-            self._write_system("Copied last assistant response.")
-        except Exception as exc:
-            self._write_error(f"Clipboard unavailable: {exc}")
+        self._copy_text(self.last_assistant_text, "Copied last assistant response.")
 
     def action_copy_transcript(self) -> None:
         if not self.transcript_plain:
             self._write_system("No transcript to copy.")
             return
+        self._copy_text("\n".join(self.transcript_plain), "Copied transcript.")
+
+    def _copy_text(self, text: str, success_message: str) -> None:
         try:
-            self.copy_to_clipboard("\n".join(self.transcript_plain))
-            self._write_system("Copied transcript.")
+            self.copy_to_clipboard(text)
+            self._write_system(success_message)
         except Exception as exc:
             self._write_error(f"Clipboard unavailable: {exc}")
+
+    def _selected_text(self) -> str:
+        try:
+            return (self.screen.get_selected_text() or "").strip()
+        except Exception:
+            return ""
 
     def action_selection_mode(self) -> None:
         self._set_selection_mode(not self.selection_mode)
@@ -514,19 +748,33 @@ class UlyssesTextualApp(App):
 
     def _start_waiting(self) -> None:
         self._waiting = True
+        self._activity_text = "starting"
         self.query_one("#composer", Input).disabled = True
-        self.query_one("#spinner", Static).update("| Ulysses is thinking...")
+        self.query_one("#spinner", Static).update("| Ulysses: starting...")
 
     def _stop_waiting(self) -> None:
         self._waiting = False
-        self.query_one("#spinner", Static).update("")
+        if not self._speaking:
+            self._activity_text = "idle"
+            self.query_one("#spinner", Static).update("")
         composer = self.query_one("#composer", Input)
         composer.disabled = False
         composer.focus()
 
     def _tick_spinner(self) -> None:
-        if self._waiting:
-            self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses is thinking...")
+        if self._waiting or self._speaking:
+            self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
+
+    def _activity_from_worker(self, message: str) -> None:
+        try:
+            self.call_from_thread(self._set_activity, message)
+        except RuntimeError:
+            self._activity_text = message
+
+    def _set_activity(self, message: str) -> None:
+        self._activity_text = message
+        if self._waiting or self._speaking:
+            self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
 
     def _write_user(self, text: str) -> None:
         self.query_one("#transcript", RichLog).write(f"[bold cyan]you[/bold cyan] [dim]{_time()}[/dim]\n{text}\n")
@@ -555,10 +803,36 @@ class UlyssesTextualApp(App):
     def _speak(self, text: str) -> None:
         if not self.voice_io or not self.voice_io.state.enabled or self.voice_io.state.muted:
             return
+        self._speech_id += 1
+        speech_id = self._speech_id
+        self.voice_io.interrupt()
+        self._speaking = True
+        self._activity_text = "speaking"
+        self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: speaking...")
+        self._refresh_status()
+        Thread(target=self._speak_in_thread, args=(text, speech_id), daemon=True).start()
+
+    def _speak_in_thread(self, text: str, speech_id: int) -> None:
         try:
             self.voice_io.speak(text)
         except Exception as exc:
-            self._write_error(f"TTS error: {exc}")
+            self.call_from_thread(self._finish_speaking, speech_id, str(exc))
+            return
+        self.call_from_thread(self._finish_speaking, speech_id, None)
+
+    def _finish_speaking(self, speech_id: int, error: str | None) -> None:
+        if speech_id != self._speech_id:
+            return
+        self._stop_speaking_ui()
+        if error:
+            self._write_error(f"TTS error: {error}")
+        self._refresh_status()
+
+    def _stop_speaking_ui(self) -> None:
+        self._speaking = False
+        if not self._waiting:
+            self._activity_text = "idle"
+            self.query_one("#spinner", Static).update("")
 
 
 def _time() -> str:
@@ -568,3 +842,22 @@ def _time() -> str:
 def _gauge(percent: int, width: int = 14) -> str:
     filled = min(width, max(0, round((percent / 100) * width)))
     return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _system_clipboard_text() -> str:
+    commands = [
+        ["wl-paste", "--no-newline"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+        ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+    ]
+    for command in commands:
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
+        except Exception:
+            continue
+        if result.returncode == 0 and result.stdout:
+            return result.stdout.rstrip("\r\n")
+    return ""

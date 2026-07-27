@@ -4,9 +4,9 @@ After=sound.target network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/sirina
+WorkingDirectory=%h/.ulysses/app
 EnvironmentFile=%h/.config/ulysses/env
-ExecStart=%h/sirina/.venv/bin/ulysses --config %h/.config/ulysses/ulysses.yaml
+ExecStart=%h/.ulysses/venv/bin/ulysses --config %h/.config/ulysses/ulysses.yaml
 Restart=on-failure
 RestartSec=5
 

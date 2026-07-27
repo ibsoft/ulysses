@@ -1,30 +1,46 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 import random
+from typing import Callable
 
 
 class AgentOrchestrator:
-    def __init__(self, config, sessions, memory, llm, skills) -> None:
+    def __init__(self, config, sessions, memory, llm, skills, config_path: str | Path | None = None) -> None:
         self.config = config
+        self.config_path = Path(config_path).expanduser() if config_path else Path("config/ulysses.yaml")
         self.sessions = sessions
         self.memory = memory
         self.llm = llm
         self.skills = skills
         self.pending_tool: dict | None = None
+        self.activity_callback: Callable[[str], None] | None = None
         existing = sessions.list_sessions()
         self.session_id = existing[0]["id"] if existing else sessions.create_session("Ulysses")
 
+    def set_activity_callback(self, callback: Callable[[str], None] | None) -> None:
+        self.activity_callback = callback
+
+    def _activity(self, message: str) -> None:
+        if self.activity_callback:
+            self.activity_callback(message)
+
     def handle_text(self, text: str) -> str:
+        self._activity("checking request")
         direct_tool = self._direct_system_command(text)
         if direct_tool:
             self.sessions.add_message(self.session_id, "user", text)
             return self._run_skill("system_command", {"command": direct_tool})
+        self._activity("saving user message")
         self.sessions.add_message(self.session_id, "user", text)
         self.memory.add(text, source=f"session:{self.session_id}", importance=0.4, metadata={"role": "user"})
+        self._activity("checking context")
         self._maybe_consolidate_session()
+        self._activity("searching memory")
         memories = self.memory.search(text, top_k=self.config.memory.top_k) if self.config.privacy.retrieve_memory else []
         context = "\n".join(f"- {item.text} ({item.source}, {item.created_at})" for item in memories)
+        self._activity("preparing prompt")
         system = self._system_prompt()
         messages = [{"role": "system", "content": system}]
         session_summary = self.sessions.session_metadata(self.session_id).get("summary")
@@ -48,11 +64,13 @@ class AgentOrchestrator:
             }
             for skill in self.skills.enabled()
         ]
+        self._activity("calling my LLM brain")
         response = self.llm.complete(messages, tools=tools)
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            return self._handle_tool_call(tool_calls[0])
+            return self._handle_tool_call(messages, message, tool_calls[0])
+        self._activity("saving answer")
         content = message.get("content") or ""
         self.sessions.add_message(self.session_id, "assistant", content)
         self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
@@ -139,22 +157,63 @@ class AgentOrchestrator:
             return text.strip()[19:].strip()
         return None
 
-    def _handle_tool_call(self, tool_call: dict) -> str:
+    def _handle_tool_call(self, messages: list[dict], message: dict, tool_call: dict) -> str:
         import json
 
         function = tool_call.get("function", {})
         name = function.get("name")
         arguments = json.loads(function.get("arguments") or "{}")
-        return self._run_skill(name, arguments)
-
-    def _run_skill(self, name: str, arguments: dict) -> str:
-        skill = self.skills.get(name)
-        result = skill.run(arguments, {"session_id": self.session_id})
+        self._activity(f"running tool: {name}")
+        result = self._run_skill_result(name, arguments)
         if result.requires_confirmation:
+            self._activity(f"waiting for confirmation: {name}")
             self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
             return result.confirmation_prompt or result.content
         self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
+        if not result.ok:
+            self._activity(f"tool failed: {name}")
+            return result.content
+
+        self._activity(f"tool complete: {name}")
+        tool_call_id = tool_call.get("id") or f"call_{name}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": message.get("content") or "",
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": tool_call.get("type", "function"),
+                        "function": function,
+                    }
+                ],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": result.content})
+        self._activity("composing final answer")
+        response = self.llm.complete(messages, tools=None)
+        content = (response["choices"][0]["message"].get("content") or "").strip()
+        if not content:
+            content = result.content
+        self._activity("saving answer")
+        self.sessions.add_message(self.session_id, "assistant", content)
+        self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+        return content
+
+    def _run_skill(self, name: str, arguments: dict) -> str:
+        self._activity(f"running tool: {name}")
+        result = self._run_skill_result(name, arguments)
+        if result.requires_confirmation:
+            self._activity(f"waiting for confirmation: {name}")
+            self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
+            return result.confirmation_prompt or result.content
+        self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
+        self._activity(f"tool complete: {name}")
         return result.content
+
+    def _run_skill_result(self, name: str, arguments: dict):
+        skill = self.skills.get(name)
+        return skill.run(arguments, {"session_id": self.session_id})
 
     def pending_tool_requires_sudo_password(self) -> bool:
         if not self.pending_tool:

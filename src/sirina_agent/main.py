@@ -37,7 +37,7 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         config.skills.skills_dir,
         include_search=config.skills.internet_search_enabled,
     )
-    orchestrator = AgentOrchestrator(config, sessions, memory, build_provider(config.llm), skills)
+    orchestrator = AgentOrchestrator(config, sessions, memory, build_provider(config.llm), skills, config_path)
     return orchestrator, SirinaSpeechIO(config)
 
 

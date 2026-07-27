@@ -44,10 +44,12 @@ class SirinaSpeechIO:
 
         self._interrupt.clear()
         self.state.tts = "speaking"
-        TextToSpeech(voice=self.config.sirina.tts_voice, normalize_text=self.config.sirina.normalize_tts_text).play(
-            text, output_device=self.config.audio.output_device
-        )
-        self.state.tts = "idle"
+        try:
+            TextToSpeech(voice=self.config.sirina.tts_voice, normalize_text=self.config.sirina.normalize_tts_text).play(
+                text, output_device=self.config.audio.output_device
+            )
+        finally:
+            self.state.tts = "idle"
 
     def interrupt(self) -> None:
         self._interrupt.set()

@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class LLMConfig(BaseModel):
-    provider: Literal["openai", "oauth_compatible", "mock"] = "openai"
+    provider: Literal["openai", "oauth_compatible", "kimi", "ollama", "mock"] = "openai"
     model: str = "gpt-4.1-mini"
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"

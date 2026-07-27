@@ -1,5 +1,19 @@
 from __future__ import annotations
 
+from threading import Thread
+
+from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
+from sirina_agent.config import load_config
+from sirina_agent.config.provider_setup import (
+    ProviderSetup,
+    apply_provider_setup,
+    default_for,
+    env_path_for_config,
+    load_env_file,
+    provider_labels,
+)
+from sirina_agent.llm.providers import build_provider
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -33,6 +47,7 @@ class RichTUI:
         self.orchestrator = orchestrator
         self.voice_io = voice_io
         self.console = Console()
+        self.artifacts = ArtifactManager.from_config(orchestrator.config)
 
     def run(self) -> None:
         self.console.print(
@@ -50,12 +65,21 @@ class RichTUI:
                 if self._command(text):
                     break
                 continue
+            wants_report = is_report_request(text)
+            prompt_text = text
+            if should_store_large_paste(text, self.orchestrator.config.context.max_chars):
+                artifact = self.artifacts.save_text_attachment(self.orchestrator.session_id, text)
+                self.console.print(f"Large paste saved as text file: {artifact.path}")
+                prompt_text = attachment_prompt(text, artifact)
             try:
                 with self.console.status("[bold magenta]Ulysses is thinking...[/bold magenta]", spinner="dots"):
-                    answer = self.orchestrator.handle_text(text)
+                    answer = self.orchestrator.handle_text(prompt_text)
             except Exception as exc:
                 self.console.print(Panel(str(exc), title="Ulysses error"))
                 continue
+            if wants_report:
+                artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
+                answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
             self.console.print(Panel(answer, title="Ulysses"))
             self._speak(answer)
 
@@ -113,6 +137,8 @@ class RichTUI:
                 self.console.print(f"Autonomous mode: {'on' if self.orchestrator.autonomous_enabled() else 'off'}")
         elif cmd in {"/status", "/config"}:
             self.console.print_json(data=self.orchestrator.config.model_dump_safe())
+        elif cmd == "/setup":
+            self._setup_provider()
         elif cmd == "/context":
             self.console.print_json(data=self.orchestrator.context_usage())
         elif cmd == "/voice":
@@ -148,9 +174,49 @@ class RichTUI:
             self.console.print("Unknown command.")
         return False
 
+    def _setup_provider(self) -> None:
+        labels = {str(index): provider for index, (provider, label) in enumerate(provider_labels(), 1)}
+        for index, (provider, label) in enumerate(provider_labels(), 1):
+            self.console.print(f"{index}. {label} ({provider})")
+        choice = Prompt.ask("provider", choices=list(labels), default="1")
+        provider = labels[choice]
+        model = Prompt.ask("model", default=default_for(provider, "model"))
+        base_url = Prompt.ask("base URL", default=default_for(provider, "base_url"))
+        api_key_env = Prompt.ask("API key env", default=default_for(provider, "api_key_env") or self.orchestrator.config.llm.api_key_env)
+        api_key = ""
+        oauth_token_env = default_for(provider, "oauth_token_env")
+        oauth_token = ""
+        if provider == "oauth_compatible":
+            oauth_token_env = Prompt.ask("OAuth token env", default=oauth_token_env)
+            oauth_token = Prompt.ask("OAuth token blank keeps existing", password=True, default="")
+        elif provider != "ollama":
+            api_key = Prompt.ask("API key blank keeps existing", password=True, default="")
+        setup = ProviderSetup(provider, model, base_url, api_key_env, api_key, oauth_token_env, oauth_token)
+        try:
+            config_path = self.orchestrator.config_path
+            apply_provider_setup(self.orchestrator.config, config_path, setup)
+            load_env_file(env_path_for_config(config_path))
+            self.orchestrator.config = load_config(config_path)
+        except Exception as exc:
+            self.console.print(Panel(str(exc), title="Provider setup failed"))
+            return
+        try:
+            self.orchestrator.llm = build_provider(self.orchestrator.config.llm)
+        except Exception as exc:
+            self.console.print(Panel(str(exc), title="Provider saved, but activation failed"))
+            return
+        self.console.print(
+            f"Provider saved and activated: {self.orchestrator.config.llm.provider} / "
+            f"{self.orchestrator.config.llm.model}"
+        )
+
     def _speak(self, text: str) -> None:
         if not self.voice_io or not self.voice_io.state.enabled or self.voice_io.state.muted:
             return
+        self.console.print("[bold magenta]Ulysses speaking...[/bold magenta]")
+        Thread(target=self._speak_in_thread, args=(text,), daemon=True).start()
+
+    def _speak_in_thread(self, text: str) -> None:
         try:
             self.voice_io.speak(text)
         except Exception as exc:

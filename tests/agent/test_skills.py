@@ -2,7 +2,8 @@ import logging
 
 from sirina_agent.security.commands import CommandPolicy, CommandRunner
 from sirina_agent.skills.builtin.create_skill import CreateSkillSkill
-from sirina_agent.skills.builtin.duckduckgo_search import normalize_results
+import sirina_agent.skills.builtin.duckduckgo_search as search_module
+from sirina_agent.skills.builtin.duckduckgo_search import DuckDuckGoSearchSkill, normalize_results
 from sirina_agent.skills.builtin.system_command import SystemCommandSkill
 from sirina_agent.skills.registry import SkillRegistry
 
@@ -10,6 +11,38 @@ from sirina_agent.skills.registry import SkillRegistry
 def test_duckduckgo_parsing():
     results = normalize_results([{"title": "A", "href": "https://a", "body": "snippet", "date": "2026-01-01"}])
     assert results == [{"title": "A", "url": "https://a", "snippet": "snippet", "timestamp": "2026-01-01"}]
+
+
+def test_duckduckgo_empty_results_are_not_blank(monkeypatch):
+    def no_results(query, limit):
+        return []
+
+    monkeypatch.setattr(search_module, "_search_with_ddgs", no_results)
+    monkeypatch.setattr(search_module, "_search_with_duckduckgo_search", no_results)
+    monkeypatch.setattr(search_module, "_search_duckduckgo_html", no_results)
+
+    result = DuckDuckGoSearchSkill().run({"query": "nothing here"}, {})
+
+    assert not result.ok
+    assert result.content == "No search results found for: nothing here"
+
+
+def test_duckduckgo_falls_back_to_next_provider(monkeypatch):
+    def broken(query, limit):
+        raise RuntimeError("primary failed")
+
+    def fallback(query, limit):
+        return [{"title": "Security News", "href": "https://example.test", "body": "Patch now."}]
+
+    monkeypatch.setattr(search_module, "_search_with_ddgs", broken)
+    monkeypatch.setattr(search_module, "_search_with_duckduckgo_search", fallback)
+    monkeypatch.setattr(search_module, "_search_duckduckgo_html", broken)
+
+    result = DuckDuckGoSearchSkill().run({"query": "latest security news"}, {})
+
+    assert result.ok
+    assert "Security News" in result.content
+    assert "_search_with_ddgs('latest security news'): primary failed" in result.data["errors"]
 
 
 def test_command_confirmation(tmp_path):

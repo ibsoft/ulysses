@@ -6,6 +6,7 @@ from sirina_agent.security.commands import CommandPolicy, CommandRunner
 from sirina_agent.sessions.store import SessionStore
 from sirina_agent.skills.registry import SkillRegistry
 from sirina_agent.skills.builtin.system_command import SystemCommandSkill
+from sirina_agent.skills.base import SkillManifest, SkillResult
 import logging
 
 
@@ -47,6 +48,48 @@ class RecordingProvider:
         return {"choices": [{"message": {"role": "assistant", "content": "final answer"}}]}
 
 
+class SearchThenAnswerProvider:
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        self.messages.append(messages)
+        if self.calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_search",
+                                    "type": "function",
+                                    "function": {"name": "internet_search", "arguments": '{"query": "latest security news"}'},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"role": "assistant", "content": "A sourced security-news summary."}}]}
+
+
+class StaticSearchSkill:
+    manifest = SkillManifest(
+        name="internet_search",
+        description="Search",
+        arguments_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        required_permissions=[],
+        risk_level="medium",
+    )
+
+    def run(self, arguments, context):
+        return SkillResult(True, "1. Security item\nhttps://example.test\nSummary", {"query": arguments["query"]})
+
+
 def test_orchestrator_pending_tool_confirmation(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
@@ -59,6 +102,42 @@ def test_orchestrator_pending_tool_confirmation(tmp_path):
     assert "Confirmation token" in prompt
     result = agent.confirm_pending_tool()
     assert str(tmp_path) in result
+
+
+def test_orchestrator_completes_answer_after_tool_call(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticSearchSkill())
+    provider = SearchThenAnswerProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    answer = agent.handle_text("what is the latest security news?")
+
+    assert answer == "A sourced security-news summary."
+    assert provider.calls == 2
+    assert provider.messages[-1][-1]["role"] == "tool"
+    assert provider.messages[-1][-1]["content"].startswith("1. Security item")
+    assert sessions.messages(agent.session_id)[-1].content == answer
+
+
+def test_orchestrator_reports_activity_during_tool_call(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticSearchSkill())
+    provider = SearchThenAnswerProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+    activities = []
+    agent.set_activity_callback(activities.append)
+
+    agent.handle_text("what is the latest security news?")
+
+    assert "calling my LLM brain" in activities
+    assert "running tool: internet_search" in activities
+    assert "composing final answer" in activities
 
 
 def test_direct_system_command_phrase(tmp_path):

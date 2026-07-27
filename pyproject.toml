@@ -22,6 +22,7 @@ dependencies = [
 cuda = ["onnxruntime-gpu>=1.16.0"]
 dev = ["pytest", "ruff"]
 agent = [
+    "ddgs>=9.0.0",
     "duckduckgo-search>=6.2.0",
     "faiss-cpu>=1.8.0",
     "openai>=1.40.0",

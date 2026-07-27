@@ -27,3 +27,5 @@
 {"id": "mem_746963a8268e4cc7d93b", "text": "Hello, John. How can I assist you today?", "source": "session:sess_20260727124532560962", "created_at": "2026-07-27T13:32:41.637288+00:00", "importance": 0.3, "metadata": {"role": "assistant"}}
 {"id": "mem_d88c5011e31d6f071d4a", "text": "how are you", "source": "session:sess_20260727124532560962", "created_at": "2026-07-27T13:33:01.908534+00:00", "importance": 0.4, "metadata": {"role": "user"}}
 {"id": "mem_cd8dfc742f419c6c8e63", "text": "I'm operational and ready, John. How can I assist you further?", "source": "session:sess_20260727124532560962", "created_at": "2026-07-27T13:33:03.845202+00:00", "importance": 0.3, "metadata": {"role": "assistant"}}
+{"id": "mem_357c314bf8e2666c4179", "text": "hello", "source": "session:sess_20260727124532560962", "created_at": "2026-07-27T15:15:58.225029+00:00", "importance": 0.4, "metadata": {"role": "user"}}
+{"id": "mem_9cef25f433d0b40d2ea4", "text": "Hello, John. What can I do for you today?", "source": "session:sess_20260727124532560962", "created_at": "2026-07-27T15:16:00.458804+00:00", "importance": 0.3, "metadata": {"role": "assistant"}}
