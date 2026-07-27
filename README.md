@@ -14,6 +14,8 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Loads built-in and local skills through a registry.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
 - Plans multi-step system inspection requests as separate tool operations, stores each output in the session, then summarizes the combined results.
+- Defaults to a Kali/Linux security-assistant prompt for authorized vulnerability assessment, penetration testing, defensive host protection, and remediation.
+- Prefers Markdown assessment reports with severity-ranked findings, evidence, technical proof of concept, impact, detailed remediation, and verification steps.
 - Keeps secrets in environment variables or keyring-backed provider configuration rather than YAML.
 
 ## Repository Layout
@@ -176,6 +178,10 @@ Important sections:
 - `logging`: structured runtime and security audit logs.
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.
+
+The default prompt configures Ulysses as a Kali/Linux vulnerability assessor and penetration-testing assistant for authorized systems. It emphasizes local host defense, evidence-based findings, and specialist coverage for XSS, IDOR/BOLA, authentication and authorization flaws, certificate/TLS issues, cloud security, and local Linux security.
+
+For assessed systems, Ulysses should prefer Markdown reports and rank findings by severity: Critical, High, Medium, Low, and Informational. Reports should include scope, methodology, evidence, proof of concept, impact, remediation, verification steps, and assumptions or limitations.
 
 Environment overrides use the `ULYSSES__` prefix. Example:
 

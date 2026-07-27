@@ -8,6 +8,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
+from sirina_agent.tui.boot import startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -340,16 +341,14 @@ class UlyssesTextualApp(App):
 
     def on_mount(self) -> None:
         self._apply_theme(self.theme_name)
-        self._write_system(
-            f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version} ready. "
-            "Paste normally into the input. Use /voice on to speak every response. "
-            "Use /select on if you want terminal-native mouse selection."
-        )
+        boot_message = startup_brief(self.orchestrator, self.voice_io)
+        self._write_system(boot_message)
         self._refresh_status()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(self.orchestrator.config.autonomous.check_interval_seconds, self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
+        self._speak(boot_message)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()

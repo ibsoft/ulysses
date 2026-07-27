@@ -33,6 +33,27 @@ step() {
   printf "\n==> %s\n" "$1"
 }
 
+print_logo() {
+  cat <<'EOF'
+
+╔══════════════════════════════════════╗
+║          U L Y S S E S               ║
+║       CYBER SENTINEL INSTALL         ║
+║                                      ║
+║             .-^^^^^^^^-.             ║
+║          .-/    /\      \-.          ║
+║        ./ /    /==\      \ \.        ║
+║       /  /    | () |      \  \       ║
+║       \  \     \==/       /  /       ║
+║        `-.\____/\/\____/.-'          ║
+║             <_// || \\_>             ║
+║              local-first             ║
+╚══════════════════════════════════════╝
+EOF
+}
+
+print_logo
+
 step "Creating Ulysses directories in ${HOME}"
 mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
 

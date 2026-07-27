@@ -4,6 +4,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
+from sirina_agent.tui.boot import startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -54,13 +55,14 @@ class RichTUI:
         self._last_response_wants_report = False
 
     def run(self) -> None:
+        boot_message = startup_brief(self.orchestrator, self.voice_io)
         self.console.print(
             Panel(
                 f"{ULYSSES_LOGO}\n"
-                f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version}\n"
-                "Type /status, /skills, /memory, /confirm, /new, /voice on, /voice off, /autonomous on, /quit."
+                f"{boot_message}"
             )
         )
+        self._speak(boot_message)
         while True:
             text = Prompt.ask("[bold cyan]you[/bold cyan]")
             if not text:
