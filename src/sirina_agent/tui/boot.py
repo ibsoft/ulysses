@@ -27,6 +27,27 @@ def startup_brief(orchestrator, voice_io=None) -> str:
     return "\n".join(lines)
 
 
+def spoken_startup_brief(orchestrator, voice_io=None) -> str:
+    cfg = orchestrator.config
+    llm_ok, _ = _llm_status(cfg)
+    memory_ok, _ = _memory_status(orchestrator)
+    skills_ok, _ = _skills_status(orchestrator)
+    prompt_ok, _ = _prompt_status(orchestrator)
+    checks = [
+        ("LLM Brain", llm_ok),
+        ("Memory", memory_ok),
+        ("Skills", skills_ok),
+        ("Prompt", prompt_ok),
+        ("Voice", voice_io is not None),
+    ]
+    lines = [f"{name} {'up' if ok else 'needs setup'}." for name, ok in checks]
+    if all(ok for _, ok in checks[:4]):
+        lines.append("All systems ready and operational.")
+    else:
+        lines.append("Core systems initialized. Review setup.")
+    return " ".join(lines)
+
+
 def _llm_status(cfg) -> tuple[bool, str]:
     llm = cfg.llm
     if llm.provider == "mock":

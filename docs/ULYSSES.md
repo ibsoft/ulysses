@@ -158,7 +158,11 @@ The current wake-word adapter is replaceable and intentionally small; if `openwa
 
 `/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
 
-Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses periodically checks the current mission/session and may write a short, humane report when it has a useful observation or next step. Each autonomous report is saved to SQLite and FAISS memory for future recovery.
+Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
+
+The defense cycle checks kernel/platform data, uptime/load, disk pressure, active sessions, recent logins, listening services, running processes, local interfaces, recent journal warnings, and availability of `ufw`, `fail2ban`, and `auditd`. It detects brute-force evidence from authentication failures and port-scan evidence from firewall/kernel log patterns such as repeated `SRC=` and `DPT=` entries.
+
+Blocking and package installation are system-changing actions. Ulysses plans them when configured, but executes them autonomously only when `skills.command.godmode: true` allows unrestricted command execution. With godmode off, the actions are logged as planned-only.
 
 ```yaml
 autonomous:
@@ -166,6 +170,12 @@ autonomous:
   report_probability: 0.35
   min_seconds_between_reports: 180
   max_recent_messages: 8
+  defense_checks_enabled: true
+  defense_elevated_interval_seconds: 45
+  defense_critical_interval_seconds: 15
+  defense_report_min_score: 0
+  auto_block_attackers: true
+  install_missing_security_apps: true
 ```
 
 Commands:

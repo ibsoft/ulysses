@@ -152,6 +152,18 @@ class StaticCommandSkill:
         return SkillResult(True, f"output for {arguments['command']}", {"command": arguments["command"]})
 
 
+class DefensiveCommandSkill:
+    manifest = StaticCommandSkill.manifest
+
+    def run(self, arguments, context):
+        command = arguments["command"]
+        if command == "journalctl -p warning -n 40 --no-pager":
+            return SkillResult(True, "sshd: Failed password for root from 10.0.0.7 port 1 ssh2\n" * 8, {})
+        if command.startswith("which "):
+            return SkillResult(False, "", {})
+        return SkillResult(True, "ok", {})
+
+
 def test_orchestrator_pending_tool_confirmation(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
@@ -365,4 +377,23 @@ def test_autonomous_check_persists_report_to_session_and_memory(tmp_path):
     note = agent.autonomous_check(force=True)
     assert note == "final answer"
     assert sessions.messages(agent.session_id)[-1].metadata["autonomous"]
-    assert memory.items[-1].source == f"autonomous:{agent.session_id}"
+    assert sessions.messages(agent.session_id)[-1].metadata["defense"]
+    assert memory.items[-1].source == f"autonomous-defense:{agent.session_id}"
+
+
+def test_autonomous_defense_logs_planned_actions_without_godmode(tmp_path):
+    cfg = UlyssesConfig()
+    cfg.autonomous.defense_report_min_score = 0
+    cfg.skills.command.godmode = False
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(DefensiveCommandSkill())
+    agent = AgentOrchestrator(cfg, sessions, memory, RecordingProvider(), registry)
+    agent.set_autonomous(True)
+
+    agent.autonomous_check(force=True)
+
+    planned = [message for message in sessions.messages(agent.session_id) if message.metadata.get("planned_only")]
+    assert any("sudo ufw deny from 10.0.0.7" in message.content for message in planned)
+    assert any("sudo apt-get install -y ufw fail2ban auditd" in message.content for message in planned)

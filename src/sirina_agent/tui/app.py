@@ -4,7 +4,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
-from sirina_agent.tui.boot import startup_brief
+from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -62,7 +62,7 @@ class RichTUI:
                 f"{boot_message}"
             )
         )
-        self._speak(boot_message)
+        self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
         while True:
             text = Prompt.ask("[bold cyan]you[/bold cyan]")
             if not text:
@@ -152,10 +152,16 @@ class RichTUI:
             if len(parts) > 1 and parts[1].lower() in {"on", "off"}:
                 enabled = parts[1].lower() == "on"
                 self.orchestrator.set_autonomous(enabled)
-                self.console.print(f"Autonomous mode: {'on' if enabled else 'off'}")
+                self.console.print(
+                    "Autonomous defense: on. Periodic host checks, evidence logging, adaptive frequency, and defensive reports."
+                    if enabled
+                    else "Autonomous defense: off."
+                )
             elif len(parts) > 1 and parts[1].lower() == "now":
                 note = self.orchestrator.autonomous_check(force=True)
                 self.console.print(Panel(note or "No autonomous report.", title="Autonomous"))
+                if note:
+                    self._speak(note)
             else:
                 self.console.print(f"Autonomous mode: {'on' if self.orchestrator.autonomous_enabled() else 'off'}")
         elif cmd in {"/status", "/config"}:
