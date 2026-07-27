@@ -38,7 +38,7 @@ class WakeWordConfig(BaseModel):
 
 class SirinaConfig(BaseModel):
     stt_engine: str = "tdt"
-    tts_voice: str = "sirina"
+    tts_voice: str = "am_michael"
     normalize_tts_text: bool = True
 
 
@@ -68,6 +68,12 @@ class AutonomousConfig(BaseModel):
     report_probability: float = 0.35
     min_seconds_between_reports: float = 180.0
     max_recent_messages: int = 8
+    defense_checks_enabled: bool = True
+    defense_elevated_interval_seconds: float = 45.0
+    defense_critical_interval_seconds: float = 15.0
+    defense_report_min_score: int = 0
+    auto_block_attackers: bool = True
+    install_missing_security_apps: bool = True
 
 
 class LoggingConfig(BaseModel):
@@ -99,7 +105,31 @@ class CommandSkillConfig(BaseModel):
     bypass_confirmation_for_allowed_commands: bool = True
     require_confirmation: bool = True
     require_typed_confirmation_for_high_risk: bool = True
-    allowed_commands: list[str] = Field(default_factory=lambda: ["pwd", "ls", "cat", "sed", "rg", "git", "python", "python3"])
+    allowed_commands: list[str] = Field(
+        default_factory=lambda: [
+            "pwd",
+            "ls",
+            "cat",
+            "sed",
+            "rg",
+            "git",
+            "python",
+            "python3",
+            "df",
+            "lsblk",
+            "fdisk",
+            "nmap",
+            "uname",
+            "uptime",
+            "who",
+            "last",
+            "ss",
+            "ps",
+            "ip",
+            "journalctl",
+            "which",
+        ]
+    )
     denied_commands: list[str] = Field(default_factory=lambda: ["rm", "sudo", "su", "chmod", "chown", "mkfs", "mount", "umount"])
     working_directory: Path = Path(".")
     timeout_seconds: float = 10.0

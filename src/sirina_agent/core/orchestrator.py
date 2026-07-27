@@ -6,6 +6,8 @@ import random
 import re
 from typing import Callable
 
+from .defense import AutonomousDefenseEngine, DefenseCheck
+
 
 class AgentOrchestrator:
     def __init__(self, config, sessions, memory, llm, skills, config_path: str | Path | None = None) -> None:
@@ -17,6 +19,7 @@ class AgentOrchestrator:
         self.skills = skills
         self.pending_tool: dict | None = None
         self.activity_callback: Callable[[str], None] | None = None
+        self.defense = AutonomousDefenseEngine()
         existing = sessions.list_sessions()
         self.session_id = existing[0]["id"] if existing else sessions.create_session("Ulysses")
 
@@ -356,6 +359,159 @@ class AgentOrchestrator:
     def autonomous_check(self, force: bool = False) -> str | None:
         if not self.autonomous_enabled():
             return None
+        if getattr(self.config.autonomous, "defense_checks_enabled", True):
+            return self._autonomous_defense_check(force)
+        return self._autonomous_reflection_check(force)
+
+    def _autonomous_defense_check(self, force: bool = False) -> str | None:
+        cfg = self.config.autonomous
+        metadata = self.sessions.session_metadata(self.session_id)
+        now = datetime.now(UTC)
+        last_check_at = metadata.get("last_autonomous_defense_check_at")
+        previous_score = int(metadata.get("last_autonomous_defense_score") or 0)
+        interval = self._autonomous_defense_interval(previous_score)
+        if last_check_at and not force:
+            try:
+                elapsed = (now - datetime.fromisoformat(last_check_at)).total_seconds()
+                if elapsed < interval:
+                    return None
+            except ValueError:
+                pass
+
+        self._activity("autonomous defense: planning checks")
+        assessment = self.defense.run(self._run_autonomous_defense_command)
+        self.defense.plan_actions(
+            assessment,
+            bool(getattr(cfg, "auto_block_attackers", True)),
+            bool(getattr(cfg, "install_missing_security_apps", True)),
+        )
+        self._execute_autonomous_defense_actions(assessment)
+        metadata["last_autonomous_defense_check_at"] = assessment.checked_at
+        metadata["last_autonomous_defense_score"] = assessment.score
+        metadata["last_autonomous_defense_severity"] = assessment.highest_severity
+        metadata["next_autonomous_defense_interval_seconds"] = self._autonomous_defense_interval(assessment.score)
+        self.sessions.update_session_metadata(self.session_id, metadata)
+
+        if not force and assessment.score < cfg.defense_report_min_score:
+            return None
+
+        prompt = (
+            "Autonomous mode is enabled. You are defending the local host you run on. "
+            "Use the collected evidence to produce a concise defensive assessment. "
+            "Log what was checked, rank any concerns by severity, and give immediate defensive next steps. "
+            "Do not invent compromise indicators unsupported by the evidence. Keep it practical.\n\n"
+            f"{assessment.prompt_text()}"
+        )
+        try:
+            self._activity("autonomous defense: calling my LLM brain")
+            response = self.llm.complete(
+                [
+                    {"role": "system", "content": self._system_prompt()},
+                    {"role": "user", "content": prompt},
+                ],
+                tools=None,
+            )
+            note = (response["choices"][0]["message"].get("content") or "").strip()
+        except Exception as exc:
+            note = (
+                f"Autonomous defense check completed, but LLM Brain failed: {exc}\n\n"
+                f"{assessment.prompt_text()[:4000]}"
+            )
+        if not note:
+            note = assessment.prompt_text()
+        self.sessions.add_message(
+            self.session_id,
+            "assistant",
+            note,
+            {"autonomous": True, "defense": True, "score": assessment.score, "severity": assessment.highest_severity},
+        )
+        self.memory.add(
+            note,
+            source=f"autonomous-defense:{self.session_id}",
+            importance=0.8 if assessment.score else 0.5,
+            metadata={"autonomous": True, "defense": True, "score": assessment.score, "severity": assessment.highest_severity},
+        )
+        metadata = self.sessions.session_metadata(self.session_id)
+        metadata["last_autonomous_report_at"] = now.isoformat()
+        self.sessions.update_session_metadata(self.session_id, metadata)
+        return note
+
+    def _execute_autonomous_defense_actions(self, assessment) -> None:
+        if not assessment.planned_actions:
+            return
+        if not self.config.skills.command.godmode:
+            for action in assessment.planned_actions:
+                content = f"planned but not executed because godmode is off: {action.command}\nReason: {action.reason}"
+                assessment.action_outputs.append(
+                    {"name": action.name, "command": action.command, "ok": False, "content": content}
+                )
+                self.sessions.add_message(
+                    self.session_id,
+                    "tool",
+                    content,
+                    {"skill": "system_command", "ok": False, "autonomous": True, "defense_action": action.name, "command": action.command, "planned_only": True},
+                )
+            return
+        for action in assessment.planned_actions:
+            self._activity(f"autonomous defense action: {action.name}")
+            result = self._run_skill_result("system_command", {"command": action.command})
+            content = result.confirmation_prompt or result.content
+            ok = bool(result.ok and not result.requires_confirmation)
+            assessment.action_outputs.append({"name": action.name, "command": action.command, "ok": ok, "content": content})
+            self.sessions.add_message(
+                self.session_id,
+                "tool",
+                content,
+                {
+                    "skill": "system_command",
+                    "ok": ok,
+                    "data": result.data,
+                    "autonomous": True,
+                    "defense_action": action.name,
+                    "command": action.command,
+                    "requires_confirmation": result.requires_confirmation,
+                },
+            )
+
+    def _run_autonomous_defense_command(self, check: DefenseCheck) -> tuple[bool, str]:
+        self._activity(f"autonomous defense: {check.name}")
+        try:
+            result = self._run_skill_result("system_command", {"command": check.command})
+        except Exception as exc:
+            content = f"check failed before execution: {exc}"
+            self.sessions.add_message(
+                self.session_id,
+                "tool",
+                content,
+                {"skill": "system_command", "ok": False, "autonomous": True, "defense_check": check.name, "command": check.command},
+            )
+            return False, content
+        if result.requires_confirmation:
+            content = result.confirmation_prompt or result.content
+            self.sessions.add_message(
+                self.session_id,
+                "tool",
+                content,
+                {"skill": "system_command", "ok": False, "autonomous": True, "defense_check": check.name, "command": check.command, "requires_confirmation": True},
+            )
+            return False, content
+        self.sessions.add_message(
+            self.session_id,
+            "tool",
+            result.content,
+            {"skill": "system_command", "ok": result.ok, "data": result.data, "autonomous": True, "defense_check": check.name, "command": check.command},
+        )
+        return result.ok, result.content
+
+    def _autonomous_defense_interval(self, score: int) -> float:
+        cfg = self.config.autonomous
+        if score >= 6:
+            return cfg.defense_critical_interval_seconds
+        if score >= 2:
+            return cfg.defense_elevated_interval_seconds
+        return cfg.check_interval_seconds
+
+    def _autonomous_reflection_check(self, force: bool = False) -> str | None:
         cfg = self.config.autonomous
         metadata = self.sessions.session_metadata(self.session_id)
         now = datetime.now(UTC)

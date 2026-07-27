@@ -8,7 +8,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
-from sirina_agent.tui.boot import startup_brief
+from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -346,9 +346,9 @@ class UlyssesTextualApp(App):
         self._refresh_status()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
-        self.set_interval(self.orchestrator.config.autonomous.check_interval_seconds, self._maybe_autonomous)
+        self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
-        self._speak(boot_message)
+        self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -550,10 +550,10 @@ class UlyssesTextualApp(App):
         mode = parts[1].lower()
         if mode == "on":
             self.orchestrator.set_autonomous(True)
-            self._write_system("Autonomous mode: on. I will periodically check the mission and report when I have something useful.")
+            self._write_system("Autonomous defense: on. I will run periodic host checks, log the evidence, adapt check frequency when risk rises, and report defensive actions.")
         elif mode == "off":
             self.orchestrator.set_autonomous(False)
-            self._write_system("Autonomous mode: off.")
+            self._write_system("Autonomous defense: off.")
         elif mode == "now":
             self._start_autonomous_check(force=True)
         else:
@@ -752,6 +752,12 @@ class UlyssesTextualApp(App):
 
     def _maybe_autonomous(self) -> None:
         self._start_autonomous_check(force=False)
+
+    def _autonomous_timer_seconds(self) -> float:
+        cfg = self.orchestrator.config.autonomous
+        if getattr(cfg, "defense_checks_enabled", True):
+            return max(5.0, min(cfg.check_interval_seconds, cfg.defense_critical_interval_seconds))
+        return cfg.check_interval_seconds
 
     def _start_autonomous_check(self, force: bool = False) -> None:
         if self._waiting or self._autonomous_running or not self.orchestrator.autonomous_enabled():

@@ -20,7 +20,7 @@ wake_word:
   threshold: 0.55
 sirina:
   stt_engine: tdt
-  tts_voice: sirina
+  tts_voice: am_michael
 memory:
   sqlite_path: var/ulysses/sessions.sqlite3
   faiss_path: var/ulysses/memory.faiss
@@ -40,6 +40,12 @@ autonomous:
   report_probability: 0.35
   min_seconds_between_reports: 180
   max_recent_messages: 8
+  defense_checks_enabled: true
+  defense_elevated_interval_seconds: 45
+  defense_critical_interval_seconds: 15
+  defense_report_min_score: 0
+  auto_block_attackers: true
+  install_missing_security_apps: true
 skills:
   internet_search_enabled: true
   command:
@@ -49,7 +55,7 @@ skills:
     require_confirmation: true
     require_typed_confirmation_for_high_risk: true
     working_directory: .
-    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk, nmap]
+    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk, nmap, uname, uptime, who, last, ss, ps, ip, journalctl, which]
     denied_commands: [rm, sudo, su, chmod, chown, mkfs, mount, umount]
 logging:
   directory: var/ulysses/logs

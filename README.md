@@ -217,7 +217,9 @@ Common commands inside the TUI:
 /quit
 ```
 
-Autonomous mode is explicit opt-in. When enabled, Ulysses periodically checks the current mission/session and may write a short report when it has a useful observation or next step.
+Autonomous mode is explicit opt-in. When enabled, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. It logs every check output, detects suspicious evidence such as brute-force attempts and port-scan patterns, adapts check frequency when risk rises, writes a defensive report, and speaks that report when voice is enabled.
+
+If configured to block attackers or install missing security apps, Ulysses plans those system-changing actions. It executes them autonomously only when `skills.command.godmode: true`; otherwise they are logged as planned-only actions.
 
 ## Security Model
 
