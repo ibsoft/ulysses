@@ -13,6 +13,7 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Provides a Textual/Rich terminal UI with sessions, memory, voice toggles, themes, and slash commands.
 - Loads built-in and local skills through a registry.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
+- Plans multi-step system inspection requests as separate tool operations, stores each output in the session, then summarizes the combined results.
 - Keeps secrets in environment variables or keyring-backed provider configuration rather than YAML.
 
 ## Repository Layout
@@ -220,11 +221,12 @@ Ulysses treats local command execution as a privileged capability.
 - Allowed and denied commands are configured in `skills.command`.
 - Risky commands require confirmation.
 - High-risk commands can require typed confirmation.
+- `bypass_confirmation_for_allowed_commands: true` is the default and skips prompts for allowlisted non-high-risk commands.
 - Execution uses a configured working directory, timeout, environment allowlist, and output cap.
 - Audit events are written under `var/ulysses/logs` by default.
 - Secrets are expected to live in environment variables or provider authentication storage, not in YAML.
 
-`skills.command.godmode: true` bypasses the command allowlist and denylist, but still uses parsed execution, configured working directory, environment filtering, timeouts, output caps, audit logging, and high-risk confirmation.
+`skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
 
 ## Privacy And Data
 

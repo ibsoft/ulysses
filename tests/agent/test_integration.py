@@ -77,6 +77,40 @@ class SearchThenAnswerProvider:
         return {"choices": [{"message": {"role": "assistant", "content": "A sourced security-news summary."}}]}
 
 
+class MultiToolThenAnswerProvider:
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        self.messages.append(messages)
+        if self.calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_a",
+                                    "type": "function",
+                                    "function": {"name": "first_tool", "arguments": '{"value": "disk"}'},
+                                },
+                                {
+                                    "id": "call_b",
+                                    "type": "function",
+                                    "function": {"name": "second_tool", "arguments": '{"value": "filesystem"}'},
+                                },
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"role": "assistant", "content": "Combined summary."}}]}
+
+
 class StaticSearchSkill:
     manifest = SkillManifest(
         name="internet_search",
@@ -88,6 +122,34 @@ class StaticSearchSkill:
 
     def run(self, arguments, context):
         return SkillResult(True, "1. Security item\nhttps://example.test\nSummary", {"query": arguments["query"]})
+
+
+class StaticNamedSkill:
+    def __init__(self, name, content):
+        self.manifest = SkillManifest(
+            name=name,
+            description=name,
+            arguments_schema={"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]},
+            required_permissions=[],
+            risk_level="low",
+        )
+        self.content = content
+
+    def run(self, arguments, context):
+        return SkillResult(True, f"{self.content}: {arguments['value']}", {"value": arguments["value"]})
+
+
+class StaticCommandSkill:
+    manifest = SkillManifest(
+        name="system_command",
+        description="Run command",
+        arguments_schema={"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+        required_permissions=[],
+        risk_level="low",
+    )
+
+    def run(self, arguments, context):
+        return SkillResult(True, f"output for {arguments['command']}", {"command": arguments["command"]})
 
 
 def test_orchestrator_pending_tool_confirmation(tmp_path):
@@ -120,6 +182,45 @@ def test_orchestrator_completes_answer_after_tool_call(tmp_path):
     assert provider.messages[-1][-1]["role"] == "tool"
     assert provider.messages[-1][-1]["content"].startswith("1. Security item")
     assert sessions.messages(agent.session_id)[-1].content == answer
+
+
+def test_orchestrator_runs_multiple_tool_calls_before_final_answer(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticNamedSkill("first_tool", "first result"))
+    registry.register(StaticNamedSkill("second_tool", "second result"))
+    provider = MultiToolThenAnswerProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    answer = agent.handle_text("compare disk and filesystem details")
+
+    assert answer == "Combined summary."
+    assert provider.calls == 2
+    final_messages = provider.messages[-1]
+    tool_messages = [message for message in final_messages if message["role"] == "tool"]
+    assert [message["content"] for message in tool_messages] == ["first result: disk", "second result: filesystem"]
+    assert sessions.messages(agent.session_id)[-1].content == answer
+
+
+def test_orchestrator_plans_disk_and_filesystem_commands_then_summarizes(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticCommandSkill())
+    provider = RecordingProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    answer = agent.handle_text("show me status of disks and filesystems")
+
+    assert answer == "final answer"
+    tool_messages = [message for message in sessions.messages(agent.session_id) if message.role == "tool"]
+    assert [message.metadata["planned_command"] for message in tool_messages] == ["df -h", "lsblk"]
+    final_prompt = provider.calls[-1][-1]["content"]
+    assert "$ df -h" in final_prompt
+    assert "$ lsblk" in final_prompt
 
 
 def test_orchestrator_reports_activity_during_tool_call(tmp_path):

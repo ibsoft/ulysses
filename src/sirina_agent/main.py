@@ -29,6 +29,7 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         config.skills.command.env_allowlist,
         config.skills.command.require_confirmation,
         config.skills.command.require_typed_confirmation_for_high_risk,
+        config.skills.command.bypass_confirmation_for_allowed_commands,
         config.skills.command.godmode,
     )
     runner = CommandRunner(policy, audit_logger(config.logging.directory), config.skills.command.timeout_seconds, config.skills.command.max_output_chars)

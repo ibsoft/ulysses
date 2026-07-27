@@ -45,6 +45,7 @@ skills:
   command:
     enabled: true
     godmode: false
+    bypass_confirmation_for_allowed_commands: true
     require_confirmation: true
     require_typed_confirmation_for_high_risk: true
     working_directory: .
@@ -60,6 +61,8 @@ prompt:
     Speak like a capable local Linux operator.
   instructions: >-
     You are a local-first Linux voice agent. Use concise answers.
+    When a request needs multiple independent operations, call the needed tools in one batch or in a short sequence,
+    then summarize the combined results and respond once.
     Ask for confirmation before risky skills. Respect privacy and never expose secrets.
   system_prompt_path: prompts/ulysses_system.md
 privacy:

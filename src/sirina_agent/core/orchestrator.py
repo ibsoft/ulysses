@@ -28,6 +28,10 @@ class AgentOrchestrator:
 
     def handle_text(self, text: str) -> str:
         self._activity("checking request")
+        direct_plan = self._direct_system_command_plan(text)
+        if direct_plan:
+            self.sessions.add_message(self.session_id, "user", text)
+            return self._run_command_plan(text, direct_plan)
         direct_tool = self._direct_system_command(text)
         if direct_tool:
             self.sessions.add_message(self.session_id, "user", text)
@@ -69,7 +73,7 @@ class AgentOrchestrator:
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            return self._handle_tool_call(messages, message, tool_calls[0])
+            return self._handle_tool_calls(messages, message, tool_calls, tools)
         self._activity("saving answer")
         content = message.get("content") or ""
         self.sessions.add_message(self.session_id, "assistant", content)
@@ -157,44 +161,92 @@ class AgentOrchestrator:
             return text.strip()[19:].strip()
         return None
 
-    def _handle_tool_call(self, messages: list[dict], message: dict, tool_call: dict) -> str:
+    def _direct_system_command_plan(self, text: str) -> list[str] | None:
+        lowered = text.strip().lower()
+        if "status" in lowered and "disk" in lowered and "filesystem" in lowered:
+            return ["df -h", "lsblk"]
+        return None
+
+    def _run_command_plan(self, user_request: str, commands: list[str]) -> str:
+        self._activity(f"planned {len(commands)} commands")
+        outputs = []
+        for index, command in enumerate(commands, start=1):
+            self._activity(f"running command {index}/{len(commands)}: {command}")
+            result = self._run_skill_result("system_command", {"command": command})
+            if result.requires_confirmation:
+                self._activity(f"waiting for confirmation: system_command")
+                self.pending_tool = {"name": "system_command", "arguments": {"command": command}, "token": result.confirmation_token}
+                return result.confirmation_prompt or result.content
+            self.sessions.add_message(
+                self.session_id,
+                "tool",
+                result.content,
+                {"skill": "system_command", "ok": result.ok, "data": result.data, "planned_command": command},
+            )
+            outputs.append(f"$ {command}\n{result.content}")
+            if not result.ok:
+                self._activity(f"command failed: {command}")
+                return result.content
+            self._activity(f"command complete: {command}")
+        return self.answer_from_tool_result(user_request, "\n\n".join(outputs))
+
+    def _handle_tool_calls(self, messages: list[dict], message: dict, tool_calls: list[dict], tools: list[dict]) -> str:
         import json
 
-        function = tool_call.get("function", {})
-        name = function.get("name")
-        arguments = json.loads(function.get("arguments") or "{}")
-        self._activity(f"running tool: {name}")
-        result = self._run_skill_result(name, arguments)
-        if result.requires_confirmation:
-            self._activity(f"waiting for confirmation: {name}")
-            self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
-            return result.confirmation_prompt or result.content
-        self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
-        if not result.ok:
-            self._activity(f"tool failed: {name}")
-            return result.content
-
-        self._activity(f"tool complete: {name}")
-        tool_call_id = tool_call.get("id") or f"call_{name}"
-        messages.append(
-            {
-                "role": "assistant",
-                "content": message.get("content") or "",
-                "tool_calls": [
+        last_tool_content = ""
+        for _ in range(4):
+            assistant_tool_calls = []
+            tool_results = []
+            for index, tool_call in enumerate(tool_calls, start=1):
+                function = tool_call.get("function", {})
+                name = function.get("name")
+                try:
+                    arguments = json.loads(function.get("arguments") or "{}")
+                except json.JSONDecodeError as exc:
+                    return f"Tool call for `{name or 'unknown'}` had invalid JSON arguments: {exc}"
+                tool_call_id = tool_call.get("id") or f"call_{name}_{index}"
+                assistant_tool_calls.append(
                     {
                         "id": tool_call_id,
                         "type": tool_call.get("type", "function"),
                         "function": function,
                     }
-                ],
-            }
-        )
-        messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": result.content})
+                )
+                if len(tool_calls) == 1:
+                    self._activity(f"running tool: {name}")
+                else:
+                    self._activity(f"running tool {index}/{len(tool_calls)}: {name}")
+                result = self._run_skill_result(name, arguments)
+                if result.requires_confirmation:
+                    self._activity(f"waiting for confirmation: {name}")
+                    self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
+                    return result.confirmation_prompt or result.content
+                self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
+                tool_results.append((tool_call_id, name, result.content))
+                last_tool_content = result.content
+                if not result.ok:
+                    self._activity(f"tool failed: {name}")
+                    return result.content
+                self._activity(f"tool complete: {name}")
+
+            messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": assistant_tool_calls})
+            for tool_call_id, name, content in tool_results:
+                messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": content})
+            self._activity("composing final answer")
+            self._activity("calling my LLM brain")
+            response = self.llm.complete(messages, tools=tools)
+            message = response["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
+            if not tool_calls:
+                content = (message.get("content") or "").strip() or last_tool_content
+                self._activity("saving answer")
+                self.sessions.add_message(self.session_id, "assistant", content)
+                self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+                return content
+
         self._activity("composing final answer")
         response = self.llm.complete(messages, tools=None)
-        content = (response["choices"][0]["message"].get("content") or "").strip()
-        if not content:
-            content = result.content
+        content = (response["choices"][0]["message"].get("content") or "").strip() or last_tool_content
         self._activity("saving answer")
         self.sessions.add_message(self.session_id, "assistant", content)
         self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
@@ -248,6 +300,30 @@ class AgentOrchestrator:
             {"skill": pending["name"], "ok": result.ok, "data": result.data},
         )
         return result.content
+
+    def answer_from_tool_result(self, user_request: str, tool_result: str) -> str:
+        self._activity("composing final answer")
+        response = self.llm.complete(
+            [
+                {"role": "system", "content": self._system_prompt()},
+                {
+                    "role": "user",
+                    "content": (
+                        f"User request:\n{user_request}\n\n"
+                        f"Tool output:\n{tool_result}\n\n"
+                        "Answer the user's request using the tool output. If they asked for a report, "
+                        "format the answer as Markdown."
+                    ),
+                },
+            ],
+            tools=None,
+        )
+        content = (response["choices"][0]["message"].get("content") or "").strip()
+        if not content:
+            content = tool_result
+        self.sessions.add_message(self.session_id, "assistant", content)
+        self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+        return content
 
     def erase_user_data(self) -> None:
         self.sessions.erase_all()

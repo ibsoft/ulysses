@@ -98,6 +98,9 @@ step "Writing default configuration"
 if [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
   cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
 fi
+if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
+  sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"
+fi
 if [[ ! -f "${CONFIG_HOME}/env" ]]; then
   cp "${APP_SOURCE}/.env.example" "${CONFIG_HOME}/env"
   chmod 600 "${CONFIG_HOME}/env"

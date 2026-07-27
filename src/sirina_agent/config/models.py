@@ -96,6 +96,7 @@ class PromptConfig(BaseModel):
 class CommandSkillConfig(BaseModel):
     enabled: bool = True
     godmode: bool = False
+    bypass_confirmation_for_allowed_commands: bool = True
     require_confirmation: bool = True
     require_typed_confirmation_for_high_risk: bool = True
     allowed_commands: list[str] = Field(default_factory=lambda: ["pwd", "ls", "cat", "sed", "rg", "git", "python", "python3"])
