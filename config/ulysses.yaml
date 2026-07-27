@@ -49,7 +49,7 @@ skills:
     require_confirmation: true
     require_typed_confirmation_for_high_risk: true
     working_directory: .
-    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk]
+    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk, nmap]
     denied_commands: [rm, sudo, su, chmod, chown, mkfs, mount, umount]
 logging:
   directory: var/ulysses/logs

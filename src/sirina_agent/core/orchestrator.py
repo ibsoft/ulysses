@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import random
+import re
 from typing import Callable
 
 
@@ -163,9 +164,18 @@ class AgentOrchestrator:
 
     def _direct_system_command_plan(self, text: str) -> list[str] | None:
         lowered = text.strip().lower()
+        nmap_target = self._nmap_target(text)
+        if nmap_target and "os" in lowered and "version" in lowered:
+            return [f"nmap -O {nmap_target}"]
         if "status" in lowered and "disk" in lowered and "filesystem" in lowered:
             return ["df -h", "lsblk"]
         return None
+
+    def _nmap_target(self, text: str) -> str | None:
+        match = re.search(r"\brun\s+nmap\s+(?:to|on)\s+([A-Za-z0-9_.:-]+)\b", text, re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1)
 
     def _run_command_plan(self, user_request: str, commands: list[str]) -> str:
         self._activity(f"planned {len(commands)} commands")

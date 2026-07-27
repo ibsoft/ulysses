@@ -223,6 +223,23 @@ def test_orchestrator_plans_disk_and_filesystem_commands_then_summarizes(tmp_pat
     assert "$ lsblk" in final_prompt
 
 
+def test_orchestrator_plans_nmap_os_version_then_summarizes(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticCommandSkill())
+    provider = RecordingProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    answer = agent.handle_text("run nmap to 192.168.7.33 and report OS version")
+
+    assert answer == "final answer"
+    tool_messages = [message for message in sessions.messages(agent.session_id) if message.role == "tool"]
+    assert [message.metadata["planned_command"] for message in tool_messages] == ["nmap -O 192.168.7.33"]
+    assert "$ nmap -O 192.168.7.33" in provider.calls[-1][-1]["content"]
+
+
 def test_orchestrator_reports_activity_during_tool_call(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
