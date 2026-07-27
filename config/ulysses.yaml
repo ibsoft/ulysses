@@ -1,0 +1,68 @@
+agent_name: Ulysses
+agent_version: "1.0"
+llm:
+  provider: openai
+  model: gpt-4.1-mini
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+audio:
+  enabled: true
+  text_only: false
+  input_device: auto
+  output_device: auto
+  language: auto
+  silence_seconds: 1.1
+  max_utterance_seconds: 20
+wake_word:
+  enabled: true
+  models:
+    - hey_ulysses
+  threshold: 0.55
+sirina:
+  stt_engine: tdt
+  tts_voice: sirina
+memory:
+  sqlite_path: var/ulysses/sessions.sqlite3
+  faiss_path: var/ulysses/memory.faiss
+  metadata_path: var/ulysses/memory.jsonl
+  embedding_provider: local_hash
+  embedding_model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  top_k: 6
+context:
+  auto_consolidate: true
+  context_window_tokens: 128000
+  max_messages: 40
+  max_chars: 24000
+  keep_last_messages: 12
+  summary_target_chars: 3000
+autonomous:
+  check_interval_seconds: 90
+  report_probability: 0.35
+  min_seconds_between_reports: 180
+  max_recent_messages: 8
+skills:
+  internet_search_enabled: true
+  command:
+    enabled: true
+    godmode: false
+    require_confirmation: true
+    require_typed_confirmation_for_high_risk: true
+    working_directory: .
+    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk]
+    denied_commands: [rm, sudo, su, chmod, chown, mkfs, mount, umount]
+logging:
+  directory: var/ulysses/logs
+tui:
+  theme: ulysses_dark
+prompt:
+  personality: >-
+    Pragmatic, calm, technically rigorous, concise, and security-aware.
+    Speak like a capable local Linux operator.
+  instructions: >-
+    You are a local-first Linux voice agent. Use concise answers.
+    Ask for confirmation before risky skills. Respect privacy and never expose secrets.
+  system_prompt_path: prompts/ulysses_system.md
+privacy:
+  privacy_mode: false
+  redact_logs: true
+  retrieve_memory: true

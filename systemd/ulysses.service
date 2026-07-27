@@ -1,0 +1,14 @@
+[Unit]
+Description=Ulysses local-first AI voice agent
+After=sound.target network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/sirina
+EnvironmentFile=%h/.config/ulysses/env
+ExecStart=%h/sirina/.venv/bin/ulysses --config %h/.config/ulysses/ulysses.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
