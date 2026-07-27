@@ -31,6 +31,21 @@ prompt:
 
 Use `prompts/ulysses_system.md` for longer system instructions. Ulysses combines the agent name/version, personality, inline instructions, and the prompt file before each LLM call.
 
+The default combined prompt frames Ulysses as a Kali/Linux vulnerability assessor and penetration-testing assistant for authorized systems. It also gives Ulysses a standing defensive mission: treat the local system it runs on as a protected host and prioritize defending it from compromise, malware, credential exposure, persistence, misconfiguration, data loss, and cyber attacks.
+
+Security specialties called out in the default prompt include:
+
+- XSS.
+- IDOR and BOLA.
+- Authentication and authorization flaws.
+- Certificate and TLS vulnerabilities.
+- Cloud security.
+- Local Linux security.
+
+For these findings, Ulysses is instructed to explain exploitability, prerequisites, affected trust boundaries, concrete evidence, proof of concept, business impact, and precise remediation.
+
+For assessed systems, Ulysses prefers Markdown reports. Assessment reports should include scope, executive summary, methodology, severity-ranked findings, detailed findings, technical proof of concept, evidence, impact, detailed remediation, verification steps, and assumptions or limitations. Findings are ranked Critical, High, Medium, Low, and Informational, and Ulysses should not invent vulnerabilities that are not supported by tool output or user-provided evidence.
+
 ## Context Consolidation
 
 Ulysses automatically consolidates long sessions so the active context stays within a practical size. Older messages are summarized into session metadata, the recent tail is kept verbatim, and the summary is injected into future LLM calls.
@@ -51,7 +66,9 @@ Default skills:
 
 - `internet_search`: DuckDuckGo search with title, URL, snippet and timestamp fields when available.
 - `system_command`: allowlisted local command execution with confirmation, typed confirmation for high-risk commands, timeouts, output caps, environment filtering and audit logs.
-- `skills.command.godmode`: when set to `true`, bypasses the command allowlist and denylist. It still uses parsed argv execution with `shell=False`, configured working directory, filtered environment, timeouts, output caps, audit logging, and high-risk confirmation.
+- `skills.command.bypass_confirmation_for_allowed_commands`: defaults to `true` and skips prompts for allowlisted non-high-risk commands.
+- `skills.command.godmode`: when set to `true`, gives full local command access. It bypasses the command allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, filtered environment, timeouts, output caps, and audit logging.
+- For multi-step system inspection requests, Ulysses plans separate commands, stores every output as tool history, and then produces one combined summary from the results.
 - `create_skill`: scaffolds new local skills from user requests into `skills.skills_dir`. It requires typed confirmation and creates disabled reviewable skills by default.
 
 Sudo behavior:
@@ -60,7 +77,7 @@ Sudo behavior:
 - The Textual TUI opens a sudo password dialog at execution time.
 - The Rich fallback prompts for the sudo password in the terminal.
 - The password is passed directly to `sudo -S` and is not stored in config, logs, SQLite, FAISS, or skill metadata.
-- In godmode, Ulysses does not open the sudo password dialog; sudo behaves like any other high-risk command and the system sudo flow decides what happens.
+- In godmode, Ulysses does not open the sudo password dialog or ask for typed high-risk confirmation; sudo behaves like any other unrestricted command and the system sudo flow decides what happens.
 
 ## Install on Ubuntu/Debian
 
@@ -214,4 +231,6 @@ Conversation messages are stored in SQLite. Semantic memory text and metadata ar
 
 ## Threat Model
 
-Primary risks are credential leakage, unsafe tool execution, unintended microphone capture, prompt injection through retrieved web content, and excessive memory retention. Ulysses mitigates these with secret redaction, environment filtering, command allowlists and denylists, confirmation prompts, typed confirmation for high-risk commands, audit logs, source-tagged memory retrieval, explicit deletion commands, and provider authentication through official configuration only.
+Primary risks are credential leakage, unsafe tool execution, unintended microphone capture, prompt injection through retrieved web content, excessive memory retention, and out-of-scope security testing. Ulysses mitigates these with secret redaction, environment filtering, command allowlists and denylists, confirmation prompts, typed confirmation for high-risk commands, audit logs, source-tagged memory retrieval, explicit deletion commands, and provider authentication through official configuration only.
+
+The default prompt treats the local host as a protected system. When compromise is suspected, Ulysses should prioritize containment, evidence preservation, impact assessment, recovery, and hardening. For intrusive testing against other systems, scope and authorization should be explicit before proceeding.

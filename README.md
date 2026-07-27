@@ -13,6 +13,9 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Provides a Textual/Rich terminal UI with sessions, memory, voice toggles, themes, and slash commands.
 - Loads built-in and local skills through a registry.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
+- Plans multi-step system inspection requests as separate tool operations, stores each output in the session, then summarizes the combined results.
+- Defaults to a Kali/Linux security-assistant prompt for authorized vulnerability assessment, penetration testing, defensive host protection, and remediation.
+- Prefers Markdown assessment reports with severity-ranked findings, evidence, technical proof of concept, impact, detailed remediation, and verification steps.
 - Keeps secrets in environment variables or keyring-backed provider configuration rather than YAML.
 
 ## Repository Layout
@@ -176,6 +179,10 @@ Important sections:
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.
 
+The default prompt configures Ulysses as a Kali/Linux vulnerability assessor and penetration-testing assistant for authorized systems. It emphasizes local host defense, evidence-based findings, and specialist coverage for XSS, IDOR/BOLA, authentication and authorization flaws, certificate/TLS issues, cloud security, and local Linux security.
+
+For assessed systems, Ulysses should prefer Markdown reports and rank findings by severity: Critical, High, Medium, Low, and Informational. Reports should include scope, methodology, evidence, proof of concept, impact, remediation, verification steps, and assumptions or limitations.
+
 Environment overrides use the `ULYSSES__` prefix. Example:
 
 ```bash
@@ -220,11 +227,12 @@ Ulysses treats local command execution as a privileged capability.
 - Allowed and denied commands are configured in `skills.command`.
 - Risky commands require confirmation.
 - High-risk commands can require typed confirmation.
+- `bypass_confirmation_for_allowed_commands: true` is the default and skips prompts for allowlisted non-high-risk commands.
 - Execution uses a configured working directory, timeout, environment allowlist, and output cap.
 - Audit events are written under `var/ulysses/logs` by default.
 - Secrets are expected to live in environment variables or provider authentication storage, not in YAML.
 
-`skills.command.godmode: true` bypasses the command allowlist and denylist, but still uses parsed execution, configured working directory, environment filtering, timeouts, output caps, audit logging, and high-risk confirmation.
+`skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
 
 ## Privacy And Data
 

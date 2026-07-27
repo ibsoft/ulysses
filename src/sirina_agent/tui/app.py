@@ -4,6 +4,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
+from sirina_agent.tui.boot import startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -22,13 +23,15 @@ from rich.table import Table
 
 ULYSSES_LOGO = r'''
 ╔════════════════════╗
-║      ULYSSES       ║
-║    ____/^\____     ║
-║   /  _     _  \    ║
-║  |  / \___/ \  |   ║
-║  |  \_/   \_/  |   ║
-║   \    ___    /    ║
-║    `-._____.-'     ║
+║    U L Y S S E S   ║
+║   CYBER SENTINEL   ║
+║       .-^^-.       ║
+║    .-/  /\  \-.    ║
+║   / /  /==\  \ \   ║
+║  | |  | () |  | |  ║
+║   \ \  \==/  / /   ║
+║    `-\__\/__/-'    ║
+║     <_//||\\_>     ║
 ╚════════════════════╝
 '''
 
@@ -48,15 +51,18 @@ class RichTUI:
         self.voice_io = voice_io
         self.console = Console()
         self.artifacts = ArtifactManager.from_config(orchestrator.config)
+        self._last_user_text = ""
+        self._last_response_wants_report = False
 
     def run(self) -> None:
+        boot_message = startup_brief(self.orchestrator, self.voice_io)
         self.console.print(
             Panel(
                 f"{ULYSSES_LOGO}\n"
-                f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version}\n"
-                "Type /status, /skills, /memory, /confirm, /new, /voice on, /voice off, /autonomous on, /quit."
+                f"{boot_message}"
             )
         )
+        self._speak(boot_message)
         while True:
             text = Prompt.ask("[bold cyan]you[/bold cyan]")
             if not text:
@@ -66,6 +72,8 @@ class RichTUI:
                     break
                 continue
             wants_report = is_report_request(text)
+            self._last_user_text = text
+            self._last_response_wants_report = wants_report
             prompt_text = text
             if should_store_large_paste(text, self.orchestrator.config.context.max_chars):
                 artifact = self.artifacts.save_text_attachment(self.orchestrator.session_id, text)
@@ -77,9 +85,10 @@ class RichTUI:
             except Exception as exc:
                 self.console.print(Panel(str(exc), title="Ulysses error"))
                 continue
-            if wants_report:
+            if wants_report and self.orchestrator.pending_tool is None:
                 artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
                 answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
+                self._last_response_wants_report = False
             self.console.print(Panel(answer, title="Ulysses"))
             self._speak(answer)
 
@@ -96,6 +105,9 @@ class RichTUI:
             for row in self.orchestrator.sessions.list_sessions():
                 table.add_row(row["id"], row["title"], row["updated_at"])
             self.console.print(table)
+        elif cmd == "/downloads":
+            files = self.artifacts.list_downloads()
+            self.console.print("\n".join(str(path) for path in files) or "No report or attachment files.")
         elif cmd == "/switch" and len(parts) > 1:
             self.orchestrator.session_id = parts[1]
         elif cmd == "/skills":
@@ -116,7 +128,18 @@ class RichTUI:
             extra = None
             if self.orchestrator.pending_tool_requires_sudo_password():
                 extra = {"sudo_password": Prompt.ask("sudo password", password=True)}
-            self.console.print(Panel(self.orchestrator.confirm_pending_tool(token, extra), title="Tool result"))
+            tool_result = self.orchestrator.confirm_pending_tool(token, extra)
+            self.console.print(Panel(tool_result, title="Tool result"))
+            if self._last_response_wants_report:
+                try:
+                    with self.console.status("[bold magenta]Ulysses is writing report...[/bold magenta]", spinner="dots"):
+                        answer = self.orchestrator.answer_from_tool_result(self._last_user_text, tool_result)
+                    artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
+                    answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
+                    self._last_response_wants_report = False
+                    self.console.print(Panel(answer, title="Ulysses"))
+                except Exception as exc:
+                    self.console.print(Panel(str(exc), title="Report failed"))
         elif cmd == "/run" and len(parts) > 1:
             self.console.print(Panel(self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}), title="Tool proposal"))
         elif cmd == "/create-skill" and len(parts) > 2:

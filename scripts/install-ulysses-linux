@@ -33,6 +33,27 @@ step() {
   printf "\n==> %s\n" "$1"
 }
 
+print_logo() {
+  cat <<'EOF'
+
+╔══════════════════════════════════════╗
+║          U L Y S S E S               ║
+║       CYBER SENTINEL INSTALL         ║
+║                                      ║
+║             .-^^^^^^^^-.             ║
+║          .-/    /\      \-.          ║
+║        ./ /    /==\      \ \.        ║
+║       /  /    | () |      \  \       ║
+║       \  \     \==/       /  /       ║
+║        `-.\____/\/\____/.-'          ║
+║             <_// || \\_>             ║
+║              local-first             ║
+╚══════════════════════════════════════╝
+EOF
+}
+
+print_logo
+
 step "Creating Ulysses directories in ${HOME}"
 mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
 
@@ -97,6 +118,12 @@ fi
 step "Writing default configuration"
 if [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
   cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+fi
+if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
+  sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"
+fi
+if grep -q '^[[:space:]]*allowed_commands:.*\]' "${CONFIG_HOME}/ulysses.yaml" && ! grep -q '^[[:space:]]*allowed_commands:.*\bnmap\b' "${CONFIG_HOME}/ulysses.yaml"; then
+  sed -i '/^[[:space:]]*allowed_commands:/s/]$/, nmap]/' "${CONFIG_HOME}/ulysses.yaml"
 fi
 if [[ ! -f "${CONFIG_HOME}/env" ]]; then
   cp "${APP_SOURCE}/.env.example" "${CONFIG_HOME}/env"

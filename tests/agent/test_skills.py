@@ -55,6 +55,58 @@ def test_command_confirmation(tmp_path):
     assert executed.ok
 
 
+def test_allowed_command_can_bypass_confirmation(tmp_path):
+    policy = CommandPolicy(
+        ["pwd"],
+        [],
+        tmp_path,
+        ["PATH"],
+        require_confirmation=True,
+        bypass_confirmation_for_allowed_commands=True,
+    )
+    skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))
+
+    result = skill.run({"command": "pwd"}, {})
+
+    assert result.ok
+    assert not result.requires_confirmation
+
+
+def test_godmode_bypasses_allowlist_and_confirmation(tmp_path):
+    policy = CommandPolicy(
+        [],
+        [],
+        tmp_path,
+        ["PATH"],
+        require_confirmation=True,
+        require_typed_confirmation_for_high_risk=True,
+        godmode=True,
+    )
+    skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))
+
+    result = skill.run({"command": "pwd"}, {})
+
+    assert result.ok
+    assert not result.requires_confirmation
+
+
+def test_godmode_allows_shell_control_operators(tmp_path):
+    policy = CommandPolicy(
+        [],
+        [],
+        tmp_path,
+        ["PATH"],
+        require_confirmation=True,
+        require_typed_confirmation_for_high_risk=True,
+        godmode=True,
+    )
+    decision = policy.evaluate("printf hello | wc -c")
+
+    assert decision.allowed
+    assert decision.argv == ["bash", "-lc", "printf hello | wc -c"]
+    assert not decision.requires_confirmation
+
+
 def test_sudo_command_requires_token_then_password(tmp_path):
     policy = CommandPolicy(["pwd"], ["rm"], tmp_path, ["PATH"], require_confirmation=True)
     skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))

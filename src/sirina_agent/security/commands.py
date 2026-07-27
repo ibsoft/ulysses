@@ -49,6 +49,7 @@ class CommandPolicy:
         env_allowlist: list[str],
         require_confirmation: bool = True,
         require_typed_confirmation_for_high_risk: bool = True,
+        bypass_confirmation_for_allowed_commands: bool = False,
         godmode: bool = False,
     ) -> None:
         self.allowed = set(allowed_commands)
@@ -57,6 +58,7 @@ class CommandPolicy:
         self.env_allowlist = set(env_allowlist)
         self.require_confirmation = require_confirmation
         self.require_typed_confirmation_for_high_risk = require_typed_confirmation_for_high_risk
+        self.bypass_confirmation_for_allowed_commands = bypass_confirmation_for_allowed_commands
         self.godmode = godmode
 
     def evaluate(self, command: str | list[str]) -> CommandDecision:
@@ -66,6 +68,8 @@ class CommandPolicy:
         executable = Path(argv[0]).name
         high_risk = executable in HIGH_RISK_TOKENS or any(token in HIGH_RISK_TOKENS for token in argv[1:])
         if any(part in {"|", "&&", "||", ";", ">", ">>", "<"} for part in argv):
+            if self.godmode and isinstance(command, str):
+                return CommandDecision(True, ["bash", "-lc", command], "allowed by godmode", True, False, False, False)
             return CommandDecision(False, argv, "shell control operators are not allowed", True)
         if executable == "sudo" and not self.godmode:
             return CommandDecision(
@@ -81,13 +85,20 @@ class CommandPolicy:
             return CommandDecision(False, argv, f"{executable} is denied", high_risk)
         if executable not in self.allowed and not self.godmode:
             return CommandDecision(False, argv, f"{executable} is not in the allowlist", high_risk)
+        requires_confirmation = self.require_confirmation
+        requires_typed_confirmation = high_risk and self.require_typed_confirmation_for_high_risk
+        if self.godmode:
+            requires_confirmation = False
+            requires_typed_confirmation = False
+        elif self.bypass_confirmation_for_allowed_commands and executable in self.allowed and not high_risk:
+            requires_confirmation = False
         return CommandDecision(
             True,
             argv,
             "allowed by godmode" if self.godmode else "allowed by policy",
             high_risk,
-            self.require_confirmation,
-            high_risk and self.require_typed_confirmation_for_high_risk,
+            requires_confirmation,
+            requires_typed_confirmation,
             False,
         )
 

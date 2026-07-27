@@ -8,6 +8,7 @@ from threading import Thread
 
 from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
 from sirina_agent.config import load_config
+from sirina_agent.tui.boot import startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -28,13 +29,15 @@ from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Stati
 
 ULYSSES_HEAD = r'''
 ╔══════════════════╗
-║     ULYSSES      ║
-║   ____/^\____    ║
-║  /  _     _  \   ║
-║ |  / \___/ \  |  ║
-║ |  \_/   \_/  |  ║
-║  \    ___    /   ║
-║   `-._____.-'    ║
+║   U L Y S S E S  ║
+║  CYBER SENTINEL  ║
+║      .-^^-.      ║
+║   .-/  /\  \-.   ║
+║  / /  /==\  \ \  ║
+║ | |  | () |  | | ║
+║  \ \  \==/  / /  ║
+║   `-\__\/__/-'   ║
+║    <_//||\\_>    ║
 ╚══════════════════╝
 '''
 
@@ -322,6 +325,7 @@ class UlyssesTextualApp(App):
                     "/memory\n"
                     "/context\n"
                     "/sessions\n"
+                    "/downloads\n"
                     "/theme [name]\n"
                     "/setup\n"
                     "/copy [selected|all]\n"
@@ -337,16 +341,14 @@ class UlyssesTextualApp(App):
 
     def on_mount(self) -> None:
         self._apply_theme(self.theme_name)
-        self._write_system(
-            f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version} ready. "
-            "Paste normally into the input. Use /voice on to speak every response. "
-            "Use /select on if you want terminal-native mouse selection."
-        )
+        boot_message = startup_brief(self.orchestrator, self.voice_io)
+        self._write_system(boot_message)
         self._refresh_status()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(self.orchestrator.config.autonomous.check_interval_seconds, self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
+        self._speak(boot_message)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -411,13 +413,29 @@ class UlyssesTextualApp(App):
 
     def _finish_answer(self, answer: str) -> None:
         self._stop_waiting()
-        if self._last_response_wants_report:
+        if self._last_response_wants_report and self.orchestrator.pending_tool is None:
             artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
             answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
             self._last_response_wants_report = False
         self._write_assistant(answer)
         self._refresh_status()
         self._speak(answer)
+
+    def _finish_confirmed_tool(self, tool_result: str) -> None:
+        self._write_tool(tool_result)
+        if not self._last_response_wants_report:
+            self._refresh_status()
+            return
+        self._start_waiting()
+        Thread(target=self._report_from_tool_in_thread, args=(self._last_user_text, tool_result), daemon=True).start()
+
+    def _report_from_tool_in_thread(self, user_request: str, tool_result: str) -> None:
+        try:
+            answer = self.orchestrator.answer_from_tool_result(user_request, tool_result)
+        except Exception as exc:
+            self.call_from_thread(self._finish_error, str(exc))
+            return
+        self.call_from_thread(self._finish_answer, answer)
 
     def _finish_error(self, error: str) -> None:
         self._stop_waiting()
@@ -435,6 +453,8 @@ class UlyssesTextualApp(App):
         elif cmd == "/sessions":
             rows = self.orchestrator.sessions.list_sessions()
             self._write_system("\n".join(f"{row['id']}  {row['title']}  {row['updated_at']}" for row in rows) or "No sessions.")
+        elif cmd == "/downloads":
+            self._write_downloads()
         elif cmd == "/switch" and len(parts) > 1:
             self.orchestrator.session_id = parts[1]
             self._write_system(f"Switched to {parts[1]}.")
@@ -454,7 +474,7 @@ class UlyssesTextualApp(App):
             if self.orchestrator.pending_tool_requires_sudo_password():
                 self.push_screen(SudoPasswordScreen(), lambda password: self._confirm_with_sudo_password(token, password))
             else:
-                self._write_tool(self.orchestrator.confirm_pending_tool(token))
+                self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token))
         elif cmd == "/run" and len(parts) > 1:
             self._write_tool(self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}))
         elif cmd == "/create-skill" and len(parts) > 2:
@@ -502,7 +522,7 @@ class UlyssesTextualApp(App):
         if password is None:
             self._write_system("Sudo command cancelled.")
             return
-        self._write_tool(self.orchestrator.confirm_pending_tool(token, {"sudo_password": password}))
+        self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token, {"sudo_password": password}))
         self._refresh_status()
 
     def _voice_command(self, parts: list[str]) -> None:
@@ -564,6 +584,10 @@ class UlyssesTextualApp(App):
         for manifest in self.orchestrator.skills.manifests():
             lines.append(f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}")
         self._write_system("\n".join(lines) or "No skills registered.")
+
+    def _write_downloads(self) -> None:
+        files = self.artifacts.list_downloads()
+        self._write_system("\n".join(str(path) for path in files) or "No report or attachment files.")
 
     def action_setup(self) -> None:
         self.push_screen(ProviderSetupScreen(self.orchestrator.config), self._finish_provider_setup)

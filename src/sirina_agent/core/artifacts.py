@@ -14,9 +14,9 @@ class Artifact:
 
 class ArtifactManager:
     def __init__(self, runtime_dir: Path) -> None:
-        self.runtime_dir = runtime_dir
-        self.attachments_dir = runtime_dir / "attachments"
-        self.reports_dir = runtime_dir / "reports"
+        self.runtime_dir = runtime_dir.expanduser().resolve()
+        self.attachments_dir = self.runtime_dir / "attachments"
+        self.reports_dir = self.runtime_dir / "reports"
 
     @classmethod
     def from_config(cls, config) -> "ArtifactManager":
@@ -28,6 +28,10 @@ class ArtifactManager:
 
     def save_markdown_report(self, session_id: str, markdown: str) -> Artifact:
         return self._write("reports", session_id, "report", "md", markdown)
+
+    def list_downloads(self, limit: int = 20) -> list[Path]:
+        files = list(self.attachments_dir.glob("*.txt")) + list(self.reports_dir.glob("*.md"))
+        return sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
 
     def _write(self, directory_name: str, session_id: str, label: str, suffix: str, content: str) -> Artifact:
         directory = self.runtime_dir / directory_name
