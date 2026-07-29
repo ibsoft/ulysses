@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import random
 import re
-from threading import Thread
+from threading import RLock, Thread
 from typing import Callable
 
 from .defense import AutonomousDefenseEngine, DefenseCheck
@@ -29,6 +29,7 @@ class AgentOrchestrator:
         self.skill_resume_name: str | None = None
         self.activity_callback: Callable[[str], None] | None = None
         self.tool_result_callback: Callable[[str, str, dict], None] | None = None
+        self._interaction_lock = RLock()
         self.defense = AutonomousDefenseEngine()
         existing = sessions.list_sessions()
         self.session_id = existing[0]["id"] if existing else sessions.create_session("Ulysses")
@@ -99,6 +100,17 @@ class AgentOrchestrator:
             self._activity(f"memory save skipped: {error[0]}")
 
     def handle_text(self, text: str) -> str:
+        with self._interaction_guard():
+            return self._handle_text_locked(text)
+
+    def _interaction_guard(self) -> RLock:
+        lock = getattr(self, "_interaction_lock", None)
+        if lock is None:
+            lock = RLock()
+            self._interaction_lock = lock
+        return lock
+
+    def _handle_text_locked(self, text: str) -> str:
         self._activity("checking request")
         direct_skill = self._direct_skill_creation(text)
         if direct_skill:
@@ -468,6 +480,14 @@ class AgentOrchestrator:
             return False
 
     def confirm_pending_tool(self, confirmation_text: str | None = None, extra_arguments: dict | None = None) -> str:
+        with self._interaction_guard():
+            return self._confirm_pending_tool_locked(confirmation_text, extra_arguments)
+
+    def _confirm_pending_tool_locked(
+        self,
+        confirmation_text: str | None = None,
+        extra_arguments: dict | None = None,
+    ) -> str:
         if not self.pending_tool:
             return "No pending tool call."
         pending = self.pending_tool

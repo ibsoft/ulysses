@@ -1,13 +1,31 @@
 from __future__ import annotations
 
+import os
 from threading import Thread
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+
+from sirina_agent.config import load_config
+from sirina_agent.config.provider_setup import (
+    ProviderSetup,
+    apply_provider_setup,
+    default_for,
+    env_path_for_config,
+    load_env_file,
+    provider_labels,
+)
+from sirina_agent.connectors.registry import ConnectorManager, connector_definitions
+from sirina_agent.connectors.setup import TelegramSetup, apply_telegram_setup
+from sirina_agent.connectors.telegram import TelegramConnector
 from sirina_agent.core.artifacts import (
     ArtifactManager,
     AssessmentProject,
     assessment_command_for_text,
-    assessment_target,
     assessment_needs_voice,
+    assessment_target,
     attachment_prompt,
     is_assessment_continuation,
     is_assessment_request,
@@ -23,23 +41,9 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
-from sirina_agent.config import load_config
-from sirina_agent.tui.branding import ULYSSES_LOGO
-from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
-from sirina_agent.config.provider_setup import (
-    ProviderSetup,
-    apply_provider_setup,
-    default_for,
-    env_path_for_config,
-    load_env_file,
-    provider_labels,
-)
 from sirina_agent.llm.providers import build_provider
-
-from rich.console import Console
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
+from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
+from sirina_agent.tui.branding import ULYSSES_LOGO
 
 
 def create_tui(orchestrator, voice_io=None):
@@ -62,6 +66,11 @@ class RichTUI:
         self._assessment_project: AssessmentProject | None = None
         self._assessment_install_attempted = False
         self._queued_input: str | None = None
+        self.connectors = ConnectorManager.from_config(
+            orchestrator.config,
+            self._handle_connector_message,
+            self.console.print,
+        )
 
     def run(self) -> None:
         boot_message = startup_brief(self.orchestrator, self.voice_io)
@@ -72,6 +81,7 @@ class RichTUI:
             )
         )
         self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
+        self.connectors.start_all()
         while True:
             if self._queued_input is None:
                 text = Prompt.ask("[bold cyan]you[/bold cyan]")
@@ -143,6 +153,7 @@ class RichTUI:
             self.console.print(Panel(answer, title="Ulysses"))
             if should_speak:
                 self._speak(answer)
+        self.connectors.stop_all()
 
     def _run_complete_assessment(self, target: str, preferred_command: str | None = None) -> str:
         assert self._assessment_project is not None
@@ -318,7 +329,12 @@ class RichTUI:
                     f"{len(set(self.orchestrator.config.skills.command.allowed_commands))} commands"
                 )
         elif cmd == "/setup":
-            self._setup_provider()
+            if len(parts) > 1 and parts[1].lower() in {"provider", "providers"}:
+                self._setup_provider()
+            elif len(parts) > 1 and parts[1].lower() in {"connector", "connectors"}:
+                self._setup_connectors()
+            else:
+                self.console.print("Usage: /setup providers or /setup connectors")
         elif cmd == "/context":
             self.console.print_json(data=self.orchestrator.context_usage())
         elif cmd == "/voice":
@@ -406,6 +422,66 @@ class RichTUI:
             f"Provider saved and activated: {self.orchestrator.config.llm.provider} / "
             f"{self.orchestrator.config.llm.model}"
         )
+
+    def _setup_connectors(self) -> None:
+        definitions = connector_definitions()
+        choices = {str(index): definition.id for index, definition in enumerate(definitions, 1)}
+        for index, definition in enumerate(definitions, 1):
+            self.console.print(f"{index}. {definition.label} - {definition.description}")
+        choice = Prompt.ask("connector", choices=list(choices), default="1")
+        connector_id = choices[choice]
+        if connector_id == "telegram":
+            self._setup_telegram()
+        else:
+            self.console.print(f"Connector setup is not available: {connector_id}")
+
+    def _setup_telegram(self) -> None:
+        if self.orchestrator.config.connectors.telegram.enabled and not Confirm.ask("Keep Telegram enabled?", default=True):
+            self.connectors.remove("telegram")
+            apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, TelegramSetup(False))
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self.console.print("Telegram connector disabled.")
+            return
+        token = Prompt.ask("BotFather token; blank keeps existing", password=True, default="")
+        telegram_config = self.orchestrator.config.connectors.telegram.model_copy(update={"enabled": True})
+        candidate = TelegramConnector(
+            telegram_config,
+            self._handle_connector_message,
+            self.console.print,
+            token=token.strip() or os.environ.get(telegram_config.token_env, ""),
+        )
+        try:
+            with self.console.status("[bold cyan]Verifying Telegram bot...[/bold cyan]", spinner="dots"):
+                username = candidate.validate()
+            apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, TelegramSetup(True, token))
+            load_env_file(env_path_for_config(self.orchestrator.config_path))
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            code = candidate.begin_pairing()
+            candidate.start()
+        except Exception as exc:
+            candidate.stop()
+            self.console.print(Panel(str(exc), title="Telegram connector setup failed"))
+            return
+        self.connectors.replace(candidate)
+        self.console.print(
+            Panel(
+                f"Bot: @{username}\nSend [bold]/verify {code}[/bold] to the bot within "
+                f"{candidate.config.pairing_code_ttl_seconds // 60} minutes.",
+                title="Telegram connector",
+            )
+        )
+
+    def _handle_connector_message(self, connector_id: str, chat_id: int, text: str) -> str:
+        self.console.print(f"[bold cyan]{connector_id.title()} {chat_id}[/bold cyan] {text}")
+        lowered = text.strip().lower()
+        if lowered.startswith("/confirm"):
+            if self.orchestrator.pending_tool_requires_sudo_password():
+                return "This command requires local sudo authentication. Confirm it in the local Ulysses console."
+            parts = text.split(maxsplit=1)
+            return self.orchestrator.confirm_pending_tool(parts[1].strip() if len(parts) == 2 else None)
+        if lowered == "/cancel":
+            return "Pending command cancelled." if self.orchestrator.cancel_pending_tool() else "No command is pending."
+        return self.orchestrator.handle_text(text)
 
     def _assessment_prompt(self, text: str, project: AssessmentProject) -> str:
         request = _project_request(project)

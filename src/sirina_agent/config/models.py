@@ -88,6 +88,19 @@ class TUIConfig(BaseModel):
     theme: Literal["ulysses_dark", "ulysses_light", "terminal"] = "ulysses_dark"
 
 
+class TelegramConnectorConfig(BaseModel):
+    enabled: bool = False
+    token_env: str = "TELEGRAM_BOT_TOKEN"
+    state_path: Path = Path("var/ulysses/connectors/telegram.json")
+    polling_timeout_seconds: float = 20.0
+    pairing_code_ttl_seconds: int = 600
+    max_message_chars: int = 3500
+
+
+class ConnectorConfig(BaseModel):
+    telegram: TelegramConnectorConfig = Field(default_factory=TelegramConnectorConfig)
+
+
 class PromptConfig(BaseModel):
     personality: str = (
         "Pragmatic, calm, technically rigorous, concise, and security-aware. "
@@ -217,6 +230,7 @@ class UlyssesConfig(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
+    connectors: ConnectorConfig = Field(default_factory=ConnectorConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
 

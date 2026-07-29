@@ -15,6 +15,7 @@ src/sirina_agent/
   sessions/                SQLite conversation persistence
   security/                command policy, confirmation and audit execution
   skills/                  skill manifests, registry, built-ins
+  connectors/              remote connector protocol, registry, manager and adapters
   tui/                     Rich terminal interface and slash commands
 ```
 
@@ -105,8 +106,10 @@ This creates:
 ~/.local/bin/ulysses
 ```
 
-Sirina model files are downloaded during install when they are missing or invalid.
-Runtime state under `~/.ulysses/app/var/ulysses` starts empty for each install, including sessions, FAISS memory, metadata, and logs.
+Sirina model files are downloaded during install when they are missing or invalid. Upgrades preserve runtime projects,
+reports, sessions, FAISS memory, metadata, logs, downloaded models, generated skills, and connector verification state.
+Interactive terminals show an animated numbered phase indicator for every installer action. Noninteractive environments
+receive stable `[ok]` or `[failed]` lines, and captured command output is shown when a phase fails.
 
 Set `OPENAI_API_KEY` in `~/.config/ulysses/env`, then run:
 
@@ -135,7 +138,7 @@ python -m pip install -e ".[wakeword]"
 
 Without that extra, Ulysses still runs text-only and Sirina VAD/push-to-talk style voice flows.
 
-Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup` inside the TUI. Provider setup supports OpenAI, Kimi / Moonshot, local Ollama, and OAuth-compatible OpenAI-style providers. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key. Ulysses does not scrape browser tokens or bypass authentication controls.
+Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI, Kimi / Moonshot, local Ollama, and OAuth-compatible OpenAI-style providers. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key. Ulysses does not scrape browser tokens or bypass authentication controls.
 
 Run text-only:
 
@@ -166,7 +169,7 @@ independent of `/voice off` and `/mute`, which control spoken responses.
 
 ## Slash Commands
 
-`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
+`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
 
 Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
 
@@ -209,6 +212,62 @@ generates and statically validates `skill.py`, and requests typed confirmation b
 `manifest.yaml`, `skill.py`, and `README.md` under `skills.skills_dir`, enables the manifest, and loads the skill immediately.
 The active skill appears in the Textual sidebar. `/skills` lists registration state and `/reload` reloads external skills.
 
+## Remote Connectors
+
+Remote messaging is managed through a connector protocol rather than directly by the TUI. `ConnectorManager` starts,
+stops, replaces, and reports status for all configured connectors. Each adapter registers a `ConnectorDefinition` and a
+factory with `register_connector`. Incoming requests include the connector ID, remote user ID, and message text, allowing
+multiple connector types to operate concurrently without connector-specific orchestration code.
+
+Current connector:
+
+- `telegram`: verified direct messages through a Telegram bot using long polling and automatic reconnection.
+
+Configure connectors from the local console:
+
+```text
+/setup connectors
+```
+
+Select Telegram, enter the BotFather token in the masked field, and wait for token validation. Ulysses displays a
+single-use command such as `/verify 123456`. Send that command directly to the bot from the Telegram account to authorize.
+The code expires after ten minutes and is invalidated after five failed attempts. Additional accounts require a new local
+pairing flow.
+
+Verified Telegram commands:
+
+- Send normal text to invoke Ulysses.
+- `/status` checks connector and verification state.
+- `/confirm <token>` confirms a pending non-sudo operation.
+- `/cancel` cancels a pending operation.
+- `/disconnect` revokes the current Telegram chat.
+
+Remote connectors never accept sudo passwords. Any operation requiring sudo authentication must be completed through the
+local protected password dialog. Local and remote orchestrator interactions are serialized to protect session and pending
+command state.
+
+```yaml
+connectors:
+  telegram:
+    enabled: false
+    token_env: TELEGRAM_BOT_TOKEN
+    state_path: var/ulysses/connectors/telegram.json
+    polling_timeout_seconds: 20
+    pairing_code_ttl_seconds: 600
+    max_message_chars: 3500
+```
+
+Secrets and state:
+
+- Bot tokens are stored in `~/.config/ulysses/env` with mode `0600`, never in YAML or transcripts.
+- Verified chat IDs are stored in `var/ulysses/connectors/telegram.json` with mode `0600`.
+- Long responses are split at readable boundaries before Telegram delivery.
+- Unverified chats cannot invoke the orchestrator or its skills.
+
+To add another connector, implement `Connector` from `sirina_agent.connectors.base`, define its credentials and
+verification flow, register its definition and factory, and add its setup form. Shared lifecycle, combined sidebar status,
+and source-aware message routing are provided by `ConnectorManager`.
+
 When `textual` is installed, Ulysses starts a full-screen TUI with transcript, sidebar status, themes, paste-friendly input, clipboard copy for the last assistant response, and shortcuts:
 
 - `Ctrl+U`: voice responses on/off
@@ -221,6 +280,7 @@ When `textual` is installed, Ulysses starts a full-screen TUI with transcript, s
 - `F2`: cycle theme
 - `F5`: status
 - `F6`: skills
+- `F7`: provider setup
 - `Ctrl+Q`: quit
 
 Terminal drag-selection is owned by your terminal emulator, not Textual. Use `/select on` or `Ctrl+S` to blur the input and make native terminal selection easier; terminals that support copy-on-select will then copy selected text automatically. Ulysses also provides `/copy` for the last answer and `/copy all` for the transcript.

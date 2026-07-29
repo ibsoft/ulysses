@@ -1,18 +1,38 @@
 from __future__ import annotations
 
-from datetime import datetime
-from itertools import cycle
+import os
 import shutil
 import subprocess
+from datetime import datetime
+from itertools import cycle
 from threading import Thread
 
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.events import Paste
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+
+from sirina_agent.config import load_config
+from sirina_agent.config.provider_setup import (
+    ProviderSetup,
+    apply_provider_setup,
+    default_for,
+    env_path_for_config,
+    load_env_file,
+    provider_labels,
+)
+from sirina_agent.connectors.registry import ConnectorManager, connector_definitions
+from sirina_agent.connectors.setup import TelegramSetup, apply_telegram_setup
+from sirina_agent.connectors.telegram import TelegramConnector
 from sirina_agent.core.artifacts import (
     Artifact,
     ArtifactManager,
     AssessmentProject,
     assessment_command_for_text,
-    assessment_target,
     assessment_needs_voice,
+    assessment_target,
     attachment_prompt,
     is_assessment_continuation,
     is_assessment_request,
@@ -30,25 +50,9 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
-from sirina_agent.config import load_config
-from sirina_agent.tui.branding import ULYSSES_LOGO
-from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
-from sirina_agent.config.provider_setup import (
-    ProviderSetup,
-    apply_provider_setup,
-    default_for,
-    env_path_for_config,
-    load_env_file,
-    provider_labels,
-)
 from sirina_agent.llm.providers import build_provider
-
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.events import Paste
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
+from sirina_agent.tui.branding import ULYSSES_LOGO
 
 
 class TranscriptLog(RichLog):
@@ -203,6 +207,83 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
         self.query_one("#setup-oauth-env", Input).value = default_for(provider, "oauth_token_env")
 
 
+class TelegramSetupScreen(ModalScreen[TelegramSetup | None]):
+    CSS = """
+    TelegramSetupScreen { align: center middle; }
+    #connector-dialog {
+        width: 68;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    #connector-token { margin: 1 0; }
+    #connector-actions { height: 3; }
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        super().__init__()
+        self.enabled = enabled
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connector-dialog"):
+            yield Label("Telegram connector")
+            yield Static("Enter the BotFather token. It is stored only in the protected environment file.")
+            yield Input(password=True, placeholder="bot token; blank keeps existing token", id="connector-token")
+            with Horizontal(id="connector-actions"):
+                yield Button("Verify & connect", variant="primary", id="connector-connect")
+                if self.enabled:
+                    yield Button("Disable", variant="error", id="connector-disable")
+                yield Button("Cancel", id="connector-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#connector-token", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "connector-connect":
+            self.dismiss(TelegramSetup(True, self.query_one("#connector-token", Input).value))
+        elif event.button.id == "connector-disable":
+            self.dismiss(TelegramSetup(False))
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(TelegramSetup(True, event.value))
+
+
+class ConnectorSelectionScreen(ModalScreen[str | None]):
+    CSS = """
+    ConnectorSelectionScreen { align: center middle; }
+    #connector-selection {
+        width: 62;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    .connector-choice { width: 100%; margin-top: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connector-selection"):
+            yield Label("Connector setup")
+            for definition in connector_definitions():
+                yield Static(definition.description)
+                yield Button(
+                    definition.label,
+                    id=f"connector-choice-{definition.id}",
+                    classes="connector-choice",
+                )
+            yield Button("Cancel", id="connector-choice-cancel", classes="connector-choice")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "connector-choice-cancel":
+            self.dismiss(None)
+        else:
+            self.dismiss(button_id.removeprefix("connector-choice-"))
+
+
 class UlyssesTextualApp(App):
     TITLE = "Ulysses"
     SUB_TITLE = "local-first AI voice agent"
@@ -319,6 +400,11 @@ class UlyssesTextualApp(App):
         self._spinner = cycle(self.SPINNER_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
+        self.connectors = ConnectorManager.from_config(
+            orchestrator.config,
+            self._handle_connector_message,
+            self._connector_event_from_worker,
+        )
         if hasattr(self.orchestrator, "set_activity_callback"):
             self.orchestrator.set_activity_callback(self._activity_from_worker)
 
@@ -368,7 +454,8 @@ class UlyssesTextualApp(App):
                     "/sessions\n"
                     "/downloads\n"
                     "/theme [name]\n"
-                    "/setup\n"
+                    "/setup providers\n"
+                    "/setup connectors\n"
                     "/copy [selected|all]\n"
                     "/select on|off\n"
                     "/quit",
@@ -388,6 +475,7 @@ class UlyssesTextualApp(App):
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self._write_system(boot_message)
         self._refresh_status()
+        self.connectors.start_all()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
@@ -784,7 +872,12 @@ class UlyssesTextualApp(App):
         elif cmd == "/reload":
             self.action_reload_config()
         elif cmd == "/setup":
-            self.action_setup()
+            if len(parts) > 1 and parts[1].lower() in {"provider", "providers"}:
+                self.action_setup()
+            elif len(parts) > 1 and parts[1].lower() in {"connector", "connectors"}:
+                self.action_connector_setup()
+            else:
+                self._write_system("Usage: /setup providers or /setup connectors")
         elif cmd == "/context":
             self._write_system(str(self.orchestrator.context_usage()))
         elif cmd == "/voice":
@@ -894,6 +987,7 @@ class UlyssesTextualApp(App):
             f"Version: {cfg.agent_version}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
+            f"Connectors: {self.connectors.summary()}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
             f"Godmode: {cfg.skills.command.godmode}\n"
             f"Config path: {self.orchestrator.config_path}\n"
@@ -971,6 +1065,106 @@ class UlyssesTextualApp(App):
 
     def action_setup(self) -> None:
         self.push_screen(ProviderSetupScreen(self.orchestrator.config), self._finish_provider_setup)
+
+    def action_connector_setup(self) -> None:
+        self.push_screen(ConnectorSelectionScreen(), self._open_connector_setup)
+
+    def _open_connector_setup(self, connector_id: str | None) -> None:
+        if connector_id is None:
+            self._write_system("Connector setup cancelled.")
+            return
+        if connector_id == "telegram":
+            enabled = self.orchestrator.config.connectors.telegram.enabled
+            self.push_screen(TelegramSetupScreen(enabled), self._finish_telegram_setup)
+            return
+        self._write_error(f"Connector setup is not available: {connector_id}")
+
+    def _finish_telegram_setup(self, setup: TelegramSetup | None) -> None:
+        if setup is None:
+            self._write_system("Connector setup cancelled.")
+            return
+        if not setup.enabled:
+            self.connectors.remove("telegram")
+            apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, setup)
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self._write_system("Telegram connector disabled. Previously verified chats are retained locally.")
+            self._refresh_status()
+            return
+        self._start_waiting()
+        Thread(target=self._telegram_setup_in_thread, args=(setup,), daemon=True).start()
+
+    def _telegram_setup_in_thread(self, setup: TelegramSetup) -> None:
+        config_path = self.orchestrator.config_path
+        telegram_config = self.orchestrator.config.connectors.telegram.model_copy(update={"enabled": True})
+        token = setup.token.strip() or os.environ.get(telegram_config.token_env, "")
+        candidate = TelegramConnector(
+            telegram_config,
+            self._handle_connector_message,
+            self._connector_event_from_worker,
+            token=token,
+        )
+        try:
+            username = candidate.validate()
+            apply_telegram_setup(self.orchestrator.config, config_path, TelegramSetup(True, setup.token))
+            load_env_file(env_path_for_config(config_path))
+            self.orchestrator.config = load_config(config_path)
+            code = candidate.begin_pairing()
+            candidate.start()
+        except Exception as exc:
+            candidate.stop()
+            self.call_from_thread(self._finish_telegram_setup_error, str(exc))
+            return
+        self.call_from_thread(self._activate_telegram_connector, candidate, username, code)
+
+    def _activate_telegram_connector(self, connector: TelegramConnector, username: str, code: str) -> None:
+        self.connectors.replace(connector)
+        self._stop_waiting()
+        self._write_system(
+            f"Telegram connector verified: @{username}\n"
+            f"Open the bot and send: /verify {code}\n"
+            f"Pairing code expires in {connector.config.pairing_code_ttl_seconds // 60} minutes."
+        )
+        self._refresh_status()
+
+    def _finish_telegram_setup_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Telegram connector setup failed: {error}")
+        self._refresh_status()
+
+    def _connector_event_from_worker(self, message: str) -> None:
+        try:
+            self.call_from_thread(self._write_system, message)
+            self.call_from_thread(self._refresh_status)
+        except RuntimeError:
+            pass
+
+    def _handle_connector_message(self, connector_id: str, chat_id: int, text: str) -> str:
+        source = f"{connector_id.title()} {chat_id}"
+        try:
+            self.call_from_thread(self._write_user, f"[{source}] {text}")
+        except RuntimeError:
+            pass
+        lowered = text.strip().lower()
+        if lowered.startswith("/confirm"):
+            if self.orchestrator.pending_tool_requires_sudo_password():
+                response = "This command requires local sudo authentication. Confirm it in the local Ulysses console."
+            else:
+                parts = text.split(maxsplit=1)
+                token = parts[1].strip() if len(parts) == 2 else None
+                response = self.orchestrator.confirm_pending_tool(token)
+        elif lowered == "/cancel":
+            response = "Pending command cancelled." if self.orchestrator.cancel_pending_tool() else "No command is pending."
+        else:
+            response = self.orchestrator.handle_text(text)
+        try:
+            self.call_from_thread(self._write_assistant, f"[{source}] {response}")
+            self.call_from_thread(self._refresh_status)
+        except RuntimeError:
+            pass
+        return response
+
+    def on_unmount(self) -> None:
+        self.connectors.stop_all()
 
     def _finish_provider_setup(self, setup: ProviderSetup | None) -> None:
         if setup is None:
@@ -1193,6 +1387,7 @@ class UlyssesTextualApp(App):
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
             f"Active skill\n{active_skill}\n\n"
+            f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Theme\n{self.theme_name}"
         )

@@ -88,6 +88,31 @@ Set your API key in `~/.config/ulysses/env`:
 OPENAI_API_KEY=your_api_key_here
 ```
 
+## Telegram Connector
+
+Create a bot with Telegram BotFather, then open Ulysses and run:
+
+```text
+/setup connectors
+```
+
+Enter the bot token in the masked setup field. Ulysses validates the token and displays a temporary pairing command such
+as `/verify 123456`. Send that command directly to the bot from the Telegram account you want to authorize. Unverified
+chats cannot invoke the agent. Pairing codes are single-use, expire after ten minutes, and are invalidated after five
+failed attempts.
+
+The bot token is stored in `~/.config/ulysses/env` with mode `0600`; verified Telegram chat IDs are stored separately in
+`var/ulysses/connectors/telegram.json` with mode `0600`. Remote sudo passwords are never accepted. Commands that require
+sudo authentication must be completed in the local Ulysses console. Send `/disconnect` to revoke the current chat.
+
+### Adding Connectors
+
+Connectors implement the shared `Connector` protocol in `sirina_agent.connectors.base` and are registered with a
+`ConnectorDefinition` and factory through `register_connector`. The `ConnectorManager` owns concurrent connector
+lifecycle, replacement, shutdown, and combined status reporting. Incoming handlers receive `connector_id`, remote user
+ID, and message text, so additional adapters do not need Telegram-specific TUI changes. Add each connector's credentials,
+verification flow, and setup form inside its own adapter and setup module.
+
 Then run:
 
 ```bash
@@ -166,7 +191,7 @@ export OPENAI_API_KEY=your_api_key_here
 ulysses --config config/ulysses.yaml
 ```
 
-Provider setup is available inside the TUI with `F7` or `/setup`. It can save and activate:
+Provider setup is available inside the TUI with `F7` or `/setup providers`. It can save and activate:
 
 - OpenAI: `https://api.openai.com/v1`, key env `OPENAI_API_KEY`
 - Kimi / Moonshot: `https://api.moonshot.ai/v1`, key env `KIMI_API_KEY`
@@ -288,7 +313,8 @@ Common commands inside the TUI:
 /copy all
 /select on
 /select off
-/setup
+/setup providers
+/setup connectors
 /autonomous on
 /autonomous off
 /export
