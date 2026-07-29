@@ -55,6 +55,17 @@ For a current-user install:
 scripts/install-ulysses-linux
 ```
 
+Running the installer again upgrades the installed application while preserving runtime projects, reports, sessions,
+memory, logs, and downloaded models. The active configuration is refreshed from `config/ulysses.yaml`; the previous
+file is retained as a timestamped backup. Use `scripts/install-ulysses-linux --preserve-config` to keep the active
+configuration unchanged during an upgrade.
+
+For a fast development deployment that only synchronizes source and configuration into the existing installation:
+
+```bash
+scripts/install-ulysses-linux --sync-only
+```
+
 The installer creates:
 
 ```text

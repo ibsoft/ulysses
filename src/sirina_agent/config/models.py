@@ -40,6 +40,7 @@ class SirinaConfig(BaseModel):
     stt_engine: str = "tdt"
     tts_voice: str = "am_michael"
     normalize_tts_text: bool = True
+    isolate_tts_process: bool = True
 
 
 class MemoryConfig(BaseModel):
@@ -105,6 +106,7 @@ class CommandSkillConfig(BaseModel):
     bypass_confirmation_for_allowed_commands: bool = True
     require_confirmation: bool = True
     require_typed_confirmation_for_high_risk: bool = True
+    install_missing_assessment_tools: bool = True
     allowed_commands: list[str] = Field(
         default_factory=lambda: [
             "pwd",
@@ -115,10 +117,60 @@ class CommandSkillConfig(BaseModel):
             "git",
             "python",
             "python3",
+            "apt",
+            "apt-get",
+            "apt-cache",
+            "dpkg",
+            "pip",
+            "pip3",
+            "pipx",
+            "curl",
+            "wget",
             "df",
             "lsblk",
             "fdisk",
             "nmap",
+            "rustscan",
+            "masscan",
+            "naabu",
+            "whatweb",
+            "nikto",
+            "nuclei",
+            "gobuster",
+            "feroxbuster",
+            "ffuf",
+            "dirsearch",
+            "httpx",
+            "subfinder",
+            "amass",
+            "dnsx",
+            "dig",
+            "host",
+            "nslookup",
+            "whois",
+            "sslscan",
+            "testssl",
+            "testssl.sh",
+            "wafw00f",
+            "enum4linux",
+            "enum4linux-ng",
+            "smbclient",
+            "smbmap",
+            "ldapsearch",
+            "snmpwalk",
+            "onesixtyone",
+            "sqlmap",
+            "hydra",
+            "medusa",
+            "patator",
+            "john",
+            "hashcat",
+            "wpscan",
+            "crackmapexec",
+            "netexec",
+            "msfconsole",
+            "msfvenom",
+            "aircrack-ng",
             "uname",
             "uptime",
             "who",
@@ -132,8 +184,8 @@ class CommandSkillConfig(BaseModel):
     )
     denied_commands: list[str] = Field(default_factory=lambda: ["rm", "sudo", "su", "chmod", "chown", "mkfs", "mount", "umount"])
     working_directory: Path = Path(".")
-    timeout_seconds: float = 10.0
-    max_output_chars: int = 12_000
+    timeout_seconds: float = 300.0
+    max_output_chars: int = 50_000
     sandbox_mode: Literal["none", "container"] = "none"
     env_allowlist: list[str] = Field(default_factory=lambda: ["PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH"])
 

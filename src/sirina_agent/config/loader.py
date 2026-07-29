@@ -6,7 +6,7 @@ from typing import Any
 
 import yaml
 
-from .models import UlyssesConfig
+from .models import CommandSkillConfig, UlyssesConfig
 
 
 def _set_nested(data: dict[str, Any], path: list[str], value: str) -> None:
@@ -41,4 +41,17 @@ def load_config(path: str | Path | None = None) -> UlyssesConfig:
         if config_path.exists():
             with config_path.open("r", encoding="utf-8") as handle:
                 raw = yaml.safe_load(handle) or {}
-    return UlyssesConfig.model_validate(_merge(raw, _env_overrides()))
+    merged = _merge(raw, _env_overrides())
+    _merge_supported_commands(merged)
+    return UlyssesConfig.model_validate(merged)
+
+
+def _merge_supported_commands(data: dict[str, Any]) -> None:
+    command = data.setdefault("skills", {}).setdefault("command", {})
+    configured = command.get("allowed_commands")
+    if configured is None:
+        return
+    if not isinstance(configured, list):
+        return
+    supported = CommandSkillConfig().allowed_commands
+    command["allowed_commands"] = list(dict.fromkeys([*configured, *supported]))

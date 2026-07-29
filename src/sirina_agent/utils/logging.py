@@ -6,7 +6,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
-SECRET_KEYS = ("api_key", "authorization", "token", "password", "secret")
+SECRET_KEYS = ("api_key", "authorization", "credential", "oauth", "token", "password", "secret")
 
 
 def redact(value: Any) -> Any:

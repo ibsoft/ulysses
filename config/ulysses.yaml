@@ -21,6 +21,7 @@ wake_word:
 sirina:
   stt_engine: tdt
   tts_voice: am_michael
+  isolate_tts_process: true
 memory:
   sqlite_path: var/ulysses/sessions.sqlite3
   faiss_path: var/ulysses/memory.faiss
@@ -50,12 +51,86 @@ skills:
   internet_search_enabled: true
   command:
     enabled: true
-    godmode: false
-    bypass_confirmation_for_allowed_commands: true
-    require_confirmation: true
-    require_typed_confirmation_for_high_risk: true
+    godmode: true
+    bypass_confirmation_for_allowed_commands: false
+    require_confirmation: false
+    require_typed_confirmation_for_high_risk: false
+    install_missing_assessment_tools: true
+    timeout_seconds: 300
+    max_output_chars: 50000
     working_directory: .
-    allowed_commands: [pwd, ls, cat, sed, rg, git, python, python3, df, lsblk, fdisk, nmap, uname, uptime, who, last, ss, ps, ip, journalctl, which]
+    allowed_commands:
+      - pwd
+      - ls
+      - cat
+      - sed
+      - rg
+      - git
+      - python
+      - python3
+      - apt
+      - apt-get
+      - apt-cache
+      - dpkg
+      - pip
+      - pip3
+      - pipx
+      - curl
+      - wget
+      - df
+      - lsblk
+      - fdisk
+      - nmap
+      - rustscan
+      - masscan
+      - naabu
+      - whatweb
+      - nikto
+      - nuclei
+      - gobuster
+      - feroxbuster
+      - ffuf
+      - dirsearch
+      - httpx
+      - subfinder
+      - amass
+      - dnsx
+      - dig
+      - host
+      - nslookup
+      - whois
+      - sslscan
+      - testssl
+      - testssl.sh
+      - wafw00f
+      - enum4linux
+      - enum4linux-ng
+      - smbclient
+      - smbmap
+      - ldapsearch
+      - snmpwalk
+      - onesixtyone
+      - sqlmap
+      - hydra
+      - medusa
+      - patator
+      - john
+      - hashcat
+      - wpscan
+      - crackmapexec
+      - netexec
+      - msfconsole
+      - msfvenom
+      - aircrack-ng
+      - uname
+      - uptime
+      - who
+      - last
+      - ss
+      - ps
+      - ip
+      - journalctl
+      - which
     denied_commands: [rm, sudo, su, chmod, chown, mkfs, mount, umount]
 logging:
   directory: var/ulysses/logs
@@ -72,8 +147,21 @@ prompt:
     Bring expert knowledge of XSS, IDOR, BOLA, certificate/TLS vulnerabilities, cloud security, and local Linux security.
     When a request needs multiple independent operations, call the needed tools in one batch or in a short sequence,
     then summarize the combined results and respond once.
-    Prefer Markdown reports for assessed systems. Rank vulnerabilities by severity, include technical proof of concept
-    details, and provide detailed remediation steps.
+    For authorized assessments, continue after non-fatal tool failures by using available alternatives, writing small
+    local Python helpers when useful, and installing required missing tools on demand when command policy permits it.
+    Never ask for sudo passwords in normal chat. When privileged execution is needed, call system_command with the
+    exact sudo command so the TUI can create a pending tool call and open the secure password dialog through /confirm.
+    If the user says to use sudo or says they will confirm, immediately propose the concrete sudo command with system_command.
+    Once a concrete target is given, assume main-domain safe baseline scope and proceed instead of asking broad planning
+    questions. Ask only for required authorization, credentials, destructive/intrusive actions, or unclear target identity.
+    For every assessment, use the created project folders: scripts, artifacts, results, and reports. Do not quit at
+    the first glitch; keep operational failures in internal results and complete useful coverage before reporting.
+    Customer reports must be confidential, professional, and delivery-ready with Document Control, Executive Summary,
+    Management Summary, Technical Summary, risk profile, scope, methodology, severity definitions, findings register,
+    detailed findings, remediation roadmap, retest criteria, technical evidence, limitations, and confidentiality notice.
+    Never expose missing-tool messages, allowlist denials, installation output, command failures, confirmation prompts,
+    internal paths, or operator diagnostics in customer reports. Rank findings by severity and provide business impact,
+    technical impact, evidence confidence, actionable remediation, and objective retest criteria.
     Ask for confirmation before risky skills. Respect privacy and never expose secrets.
   system_prompt_path: prompts/ulysses_system.md
 privacy:

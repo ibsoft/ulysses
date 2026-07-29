@@ -118,6 +118,24 @@ def test_sudo_command_requires_token_then_password(tmp_path):
     assert needs_password.data["sudo_password_required"]
 
 
+def test_godmode_sudo_skips_token_but_requires_password(tmp_path):
+    policy = CommandPolicy(["pwd"], ["rm"], tmp_path, ["PATH"], require_confirmation=True, godmode=True)
+    skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))
+
+    proposal = skill.run({"command": "sudo id"}, {})
+
+    assert proposal.requires_confirmation
+    assert "sudo password" in proposal.content.lower() or "sudo password" in (proposal.confirmation_prompt or "").lower()
+    assert proposal.confirmation_token
+
+
+def test_sudo_password_is_not_exposed_to_llm_tool_schema(tmp_path):
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"])
+    skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))
+
+    assert "sudo_password" not in skill.manifest.arguments_schema["properties"]
+
+
 def test_create_skill_scaffolds_reviewable_skill(tmp_path):
     skill = CreateSkillSkill(tmp_path / "skills")
     proposal = skill.run({"name": "Weather Skill", "request": "Create a weather lookup skill"}, {})

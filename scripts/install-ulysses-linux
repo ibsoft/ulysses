@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PRESERVE_CONFIG=false
+SYNC_ONLY=false
+for argument in "$@"; do
+  case "${argument}" in
+  --preserve-config)
+    PRESERVE_CONFIG=true
+    ;;
+  --sync-only)
+    SYNC_ONLY=true
+    ;;
+  *)
+    printf "error: unknown option: %s\n" "${argument}" >&2
+    printf "usage: %s [--sync-only] [--preserve-config]\n" "$0" >&2
+    exit 2
+    ;;
+  esac
+done
+
 APP_HOME="${HOME}/.ulysses"
 APP_SOURCE="${APP_HOME}/app"
 MODEL_HOME="${APP_SOURCE}/models"
@@ -60,64 +78,87 @@ mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
 step "Copying Ulysses files to ${APP_SOURCE}"
 if [[ "${PROJECT_ROOT}" != "${APP_SOURCE}" ]]; then
   MODEL_BACKUP=""
+  RUNTIME_BACKUP=""
   if [[ -d "${APP_SOURCE}/models" ]]; then
     MODEL_BACKUP="${APP_HOME}/.models.backup.$$"
-    rm -rf "${MODEL_BACKUP}"
     mv "${APP_SOURCE}/models" "${MODEL_BACKUP}"
+  fi
+  if [[ -d "${APP_SOURCE}/var/ulysses" ]]; then
+    RUNTIME_BACKUP="${APP_HOME}/.runtime.backup.$$"
+    mv "${APP_SOURCE}/var/ulysses" "${RUNTIME_BACKUP}"
   fi
   rm -rf "${APP_SOURCE}"
   mkdir -p "${APP_SOURCE}"
   cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"
+  rm -rf "${APP_SOURCE}/var/ulysses"
   if [[ -n "${MODEL_BACKUP}" ]]; then
     rm -rf "${APP_SOURCE}/models"
     mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
   fi
+  if [[ -n "${RUNTIME_BACKUP}" ]]; then
+    mkdir -p "${APP_SOURCE}/var"
+    mv "${RUNTIME_BACKUP}" "${APP_SOURCE}/var/ulysses"
+  fi
 fi
-rm -rf "${APP_SOURCE}/var/ulysses"
 mkdir -p "${APP_SOURCE}/var/ulysses/logs"
 
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  printf "error: Python executable not found: %s\n" "${PYTHON_BIN}" >&2
-  exit 1
-fi
-
-if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-  printf "error: Ulysses requires Python 3.11 or newer, but %s is " "${PYTHON_BIN}" >&2
-  "${PYTHON_BIN}" --version >&2
-  printf "\nInstall Python 3.11+, or rerun with PYTHON_BIN=/path/to/python3.11 %s\n" "$0" >&2
-  exit 1
-fi
-
-step "Creating virtual environment"
-if [[ -x "${APP_HOME}/venv/bin/python" ]] &&
-  ! "${APP_HOME}/venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-  printf "error: existing virtual environment uses " >&2
-  "${APP_HOME}/venv/bin/python" --version >&2
-  printf "\nRemove %s/venv and rerun the installer with Python 3.11 or newer.\n" "${APP_HOME}" >&2
-  exit 1
-fi
-"${PYTHON_BIN}" -m venv "${APP_HOME}/venv" &
-spin "$!" "virtual environment ready"
-
-step "Upgrading pip"
-"${APP_HOME}/venv/bin/python" -m pip install --upgrade pip &
-spin "$!" "pip upgraded"
-
-step "Installing Ulysses from copied files"
-"${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]" &
-spin "$!" "Ulysses installed"
-
-step "Checking Sirina models"
-if "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" check-models --group all >/dev/null 2>&1; then
-  printf "[ok] Sirina models ready\n"
+if [[ "${SYNC_ONLY}" == true ]]; then
+  if [[ ! -x "${APP_HOME}/venv/bin/ulysses" ]]; then
+    printf "error: --sync-only requires an existing installation at %s\n" "${APP_HOME}" >&2
+    exit 1
+  fi
+  printf "[ok] Existing virtual environment and models preserved\n"
 else
-  "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all &
-  spin "$!" "Sirina models downloaded"
+  if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    printf "error: Python executable not found: %s\n" "${PYTHON_BIN}" >&2
+    exit 1
+  fi
+
+  if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+    printf "error: Ulysses requires Python 3.11 or newer, but %s is " "${PYTHON_BIN}" >&2
+    "${PYTHON_BIN}" --version >&2
+    printf "\nInstall Python 3.11+, or rerun with PYTHON_BIN=/path/to/python3.11 %s\n" "$0" >&2
+    exit 1
+  fi
+
+  step "Creating virtual environment"
+  if [[ -x "${APP_HOME}/venv/bin/python" ]] &&
+    ! "${APP_HOME}/venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+    printf "error: existing virtual environment uses " >&2
+    "${APP_HOME}/venv/bin/python" --version >&2
+    printf "\nRemove %s/venv and rerun with Python 3.11 or newer.\n" "${APP_HOME}" >&2
+    exit 1
+  fi
+  "${PYTHON_BIN}" -m venv "${APP_HOME}/venv" &
+  spin "$!" "virtual environment ready"
+
+  step "Upgrading pip"
+  "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip &
+  spin "$!" "pip upgraded"
+
+  step "Installing Ulysses from copied files"
+  "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]" &
+  spin "$!" "Ulysses installed"
+
+  step "Checking Sirina models"
+  if "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" check-models --group all >/dev/null 2>&1; then
+    printf "[ok] Sirina models ready\n"
+  else
+    "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all &
+    spin "$!" "Sirina models downloaded"
+  fi
 fi
 
 step "Writing default configuration"
-if [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
+if [[ -f "${CONFIG_HOME}/ulysses.yaml" && "${PRESERVE_CONFIG}" == false ]]; then
+  CONFIG_BACKUP="${CONFIG_HOME}/ulysses.yaml.backup-$(date +%Y%m%d-%H%M%S)"
+  cp -p "${CONFIG_HOME}/ulysses.yaml" "${CONFIG_BACKUP}"
   cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+  printf "[ok] Configuration refreshed; previous file saved as %s\n" "${CONFIG_BACKUP}"
+elif [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
+  cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+else
+  printf "[ok] Existing configuration preserved by request\n"
 fi
 if grep -q '^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$' "${CONFIG_HOME}/ulysses.yaml"; then
   sed -i 's/^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$/  tts_voice: am_michael/' "${CONFIG_HOME}/ulysses.yaml"
@@ -125,14 +166,8 @@ fi
 if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
   sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"
 fi
-for command_name in nmap uname uptime who last ss ps ip journalctl; do
-  if grep -q '^[[:space:]]*allowed_commands:.*\]' "${CONFIG_HOME}/ulysses.yaml" && ! grep -Eq "^[[:space:]]*allowed_commands:.*(^|[ ,[])${command_name}([] ,]|$)" "${CONFIG_HOME}/ulysses.yaml"; then
-    sed -i "/^[[:space:]]*allowed_commands:/s/]$/, ${command_name}]/" "${CONFIG_HOME}/ulysses.yaml"
-  fi
-done
-if grep -q '^[[:space:]]*allowed_commands:.*\]' "${CONFIG_HOME}/ulysses.yaml" && ! grep -Eq '^[[:space:]]*allowed_commands:.*(^|[ ,[])which([] ,]|$)' "${CONFIG_HOME}/ulysses.yaml"; then
-  sed -i '/^[[:space:]]*allowed_commands:/s/]$/, which]/' "${CONFIG_HOME}/ulysses.yaml"
-fi
+# The loader unions legacy allowlists with the supported command set. Keep the
+# user file intact here so upgrades do not overwrite local security settings.
 if ! grep -q '^[[:space:]]*defense_checks_enabled:' "${CONFIG_HOME}/ulysses.yaml"; then
   sed -i '/^[[:space:]]*max_recent_messages:/a\  defense_checks_enabled: true\n  defense_elevated_interval_seconds: 45\n  defense_critical_interval_seconds: 15\n  defense_report_min_score: 0\n  auto_block_attackers: true\n  install_missing_security_apps: true' "${CONFIG_HOME}/ulysses.yaml"
 fi

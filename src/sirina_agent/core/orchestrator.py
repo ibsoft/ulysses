@@ -4,9 +4,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 import random
 import re
+from threading import Thread
 from typing import Callable
 
 from .defense import AutonomousDefenseEngine, DefenseCheck
+from ..security.commands import CommandPolicy
+from ..skills.base import SkillResult
+
+
+MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
 
 
 class AgentOrchestrator:
@@ -19,6 +25,7 @@ class AgentOrchestrator:
         self.skills = skills
         self.pending_tool: dict | None = None
         self.activity_callback: Callable[[str], None] | None = None
+        self.tool_result_callback: Callable[[str, str, dict], None] | None = None
         self.defense = AutonomousDefenseEngine()
         existing = sessions.list_sessions()
         self.session_id = existing[0]["id"] if existing else sessions.create_session("Ulysses")
@@ -26,9 +33,67 @@ class AgentOrchestrator:
     def set_activity_callback(self, callback: Callable[[str], None] | None) -> None:
         self.activity_callback = callback
 
+    def set_tool_result_callback(self, callback: Callable[[str, str, dict], None] | None) -> None:
+        self.tool_result_callback = callback
+
+    def sync_command_policy_from_config(self, force: bool = True) -> bool:
+        try:
+            skill = self.skills.get("system_command")
+            if not force:
+                current_policy = skill.runner.policy
+                configured_cwd = self.config.skills.command.working_directory.resolve()
+                if current_policy.working_directory != configured_cwd:
+                    return False
+            skill.runner.policy = CommandPolicy(
+                self.config.skills.command.allowed_commands,
+                self.config.skills.command.denied_commands,
+                self.config.skills.command.working_directory,
+                self.config.skills.command.env_allowlist,
+                self.config.skills.command.require_confirmation,
+                self.config.skills.command.require_typed_confirmation_for_high_risk,
+                self.config.skills.command.bypass_confirmation_for_allowed_commands,
+                self.config.skills.command.godmode,
+            )
+            skill.runner.timeout_seconds = self.config.skills.command.timeout_seconds
+            skill.runner.max_output_chars = self.config.skills.command.max_output_chars
+            return True
+        except Exception:
+            return False
+
     def _activity(self, message: str) -> None:
         if self.activity_callback:
             self.activity_callback(message)
+
+    def _record_tool_result(self, name: str, content: str, metadata: dict) -> None:
+        self.sessions.add_message(self.session_id, "tool", content, metadata)
+        if self.tool_result_callback:
+            self.tool_result_callback(name, content, metadata)
+
+    def _save_assistant_message(self, content: str, metadata: dict | None = None, importance: float = 0.3, source_prefix: str = "session") -> None:
+        self.sessions.add_message(self.session_id, "assistant", content, metadata)
+        self._save_memory_soft(
+            content,
+            source=f"{source_prefix}:{self.session_id}",
+            importance=importance,
+            metadata=metadata or {"role": "assistant"},
+        )
+
+    def _save_memory_soft(self, text: str, source: str, importance: float, metadata: dict | None = None) -> None:
+        error: list[Exception] = []
+
+        def save() -> None:
+            try:
+                self.memory.add(text, source=source, importance=importance, metadata=metadata or {})
+            except Exception as exc:
+                error.append(exc)
+
+        worker = Thread(target=save, daemon=True)
+        worker.start()
+        worker.join(MEMORY_SAVE_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            self._activity("memory save deferred")
+        elif error:
+            self._activity(f"memory save skipped: {error[0]}")
 
     def handle_text(self, text: str) -> str:
         self._activity("checking request")
@@ -42,7 +107,7 @@ class AgentOrchestrator:
             return self._run_skill("system_command", {"command": direct_tool})
         self._activity("saving user message")
         self.sessions.add_message(self.session_id, "user", text)
-        self.memory.add(text, source=f"session:{self.session_id}", importance=0.4, metadata={"role": "user"})
+        self._save_memory_soft(text, source=f"session:{self.session_id}", importance=0.4, metadata={"role": "user"})
         self._activity("checking context")
         self._maybe_consolidate_session()
         self._activity("searching memory")
@@ -80,8 +145,7 @@ class AgentOrchestrator:
             return self._handle_tool_calls(messages, message, tool_calls, tools)
         self._activity("saving answer")
         content = message.get("content") or ""
-        self.sessions.add_message(self.session_id, "assistant", content)
-        self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+        self._save_assistant_message(content)
         return content
 
     def _maybe_consolidate_session(self) -> None:
@@ -190,16 +254,16 @@ class AgentOrchestrator:
                 self._activity(f"waiting for confirmation: system_command")
                 self.pending_tool = {"name": "system_command", "arguments": {"command": command}, "token": result.confirmation_token}
                 return result.confirmation_prompt or result.content
-            self.sessions.add_message(
-                self.session_id,
-                "tool",
+            self._record_tool_result(
+                "system_command",
                 result.content,
                 {"skill": "system_command", "ok": result.ok, "data": result.data, "planned_command": command},
             )
             outputs.append(f"$ {command}\n{result.content}")
             if not result.ok:
                 self._activity(f"command failed: {command}")
-                return result.content
+                outputs.append("Continuing with remaining planned checks where possible.")
+                continue
             self._activity(f"command complete: {command}")
         return self.answer_from_tool_result(user_request, "\n\n".join(outputs))
 
@@ -234,12 +298,12 @@ class AgentOrchestrator:
                     self._activity(f"waiting for confirmation: {name}")
                     self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
                     return result.confirmation_prompt or result.content
-                self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
+                self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
                 tool_results.append((tool_call_id, name, result.content))
                 last_tool_content = result.content
                 if not result.ok:
                     self._activity(f"tool failed: {name}")
-                    return result.content
+                    continue
                 self._activity(f"tool complete: {name}")
 
             messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": assistant_tool_calls})
@@ -253,16 +317,14 @@ class AgentOrchestrator:
             if not tool_calls:
                 content = (message.get("content") or "").strip() or last_tool_content
                 self._activity("saving answer")
-                self.sessions.add_message(self.session_id, "assistant", content)
-                self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+                self._save_assistant_message(content)
                 return content
 
         self._activity("composing final answer")
         response = self.llm.complete(messages, tools=None)
         content = (response["choices"][0]["message"].get("content") or "").strip() or last_tool_content
         self._activity("saving answer")
-        self.sessions.add_message(self.session_id, "assistant", content)
-        self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+        self._save_assistant_message(content)
         return content
 
     def _run_skill(self, name: str, arguments: dict) -> str:
@@ -272,13 +334,24 @@ class AgentOrchestrator:
             self._activity(f"waiting for confirmation: {name}")
             self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
             return result.confirmation_prompt or result.content
-        self.sessions.add_message(self.session_id, "tool", result.content, {"skill": name, "ok": result.ok, "data": result.data})
+        self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
         self._activity(f"tool complete: {name}")
         return result.content
 
     def _run_skill_result(self, name: str, arguments: dict):
-        skill = self.skills.get(name)
-        return skill.run(arguments, {"session_id": self.session_id})
+        if name == "system_command" and "sudo_password" in arguments:
+            arguments = dict(arguments)
+            arguments.pop("sudo_password", None)
+        if name == "system_command":
+            self.sync_command_policy_from_config(force=False)
+        try:
+            skill = self.skills.get(name)
+        except KeyError:
+            return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": arguments})
+        try:
+            return skill.run(arguments, {"session_id": self.session_id})
+        except Exception as exc:
+            return SkillResult(False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": arguments, "error": str(exc)})
 
     def pending_tool_requires_sudo_password(self) -> bool:
         if not self.pending_tool:
@@ -286,6 +359,9 @@ class AgentOrchestrator:
         try:
             skill = self.skills.get(self.pending_tool["name"])
             arguments = dict(self.pending_tool["arguments"])
+            command = str(arguments.get("command", ""))
+            if command.strip().startswith("sudo "):
+                return True
             decision = skill.runner.policy.evaluate(arguments["command"])
             return bool(getattr(decision, "sudo_password_required", False))
         except Exception:
@@ -306,13 +382,14 @@ class AgentOrchestrator:
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content
-        self.sessions.add_message(
-            self.session_id,
-            "tool",
-            result.content,
-            {"skill": pending["name"], "ok": result.ok, "data": result.data},
-        )
+        self._record_tool_result(pending["name"], result.content, {"skill": pending["name"], "ok": result.ok, "data": result.data})
         return result.content
+
+    def cancel_pending_tool(self) -> bool:
+        if not self.pending_tool:
+            return False
+        self.pending_tool = None
+        return True
 
     def answer_from_tool_result(self, user_request: str, tool_result: str) -> str:
         self._activity("composing final answer")
@@ -325,10 +402,13 @@ class AgentOrchestrator:
                         f"User request:\n{user_request}\n\n"
                         f"Tool output:\n{tool_result}\n\n"
                         "Answer the user's request using the tool output. If they asked for a report, "
-                        "format the answer as Markdown. For assessed systems, produce a vulnerability assessment report "
-                        "with this structure: title, scope, executive summary, methodology, severity-ranked findings table, "
-                        "detailed findings, technical proof of concept, evidence, impact, detailed remediation, verification "
-                        "steps, and assumptions or limitations. Rank findings Critical, High, Medium, Low, Informational. "
+                        "format the answer as customer-delivery Markdown. For assessed systems, produce a confidential vulnerability "
+                        "assessment report with document control, Executive Summary, Management Summary, Technical Summary, risk profile, "
+                        "scope, methodology, severity definitions, severity-ranked findings table, detailed findings, technical proof of "
+                        "concept, business and technical impact, detailed remediation, verification steps, evidence appendix, assumptions "
+                        "and limitations, and confidentiality notice. Exclude missing-tool messages, allowlist denials, installation output, "
+                        "command failures, confirmation prompts, internal paths, and operator diagnostics. Rank findings Critical, High, "
+                        "Medium, Low, Informational. "
                         "Do not invent vulnerabilities that are not supported by the tool output."
                     ),
                 },
@@ -338,8 +418,7 @@ class AgentOrchestrator:
         content = (response["choices"][0]["message"].get("content") or "").strip()
         if not content:
             content = tool_result
-        self.sessions.add_message(self.session_id, "assistant", content)
-        self.memory.add(content, source=f"session:{self.session_id}", importance=0.3, metadata={"role": "assistant"})
+        self._save_assistant_message(content)
         return content
 
     def erase_user_data(self) -> None:
@@ -425,7 +504,7 @@ class AgentOrchestrator:
             note,
             {"autonomous": True, "defense": True, "score": assessment.score, "severity": assessment.highest_severity},
         )
-        self.memory.add(
+        self._save_memory_soft(
             note,
             source=f"autonomous-defense:{self.session_id}",
             importance=0.8 if assessment.score else 0.5,
@@ -550,7 +629,7 @@ class AgentOrchestrator:
         if not note:
             return None
         self.sessions.add_message(self.session_id, "assistant", note, {"autonomous": True})
-        self.memory.add(note, source=f"autonomous:{self.session_id}", importance=0.65, metadata={"autonomous": True})
+        self._save_memory_soft(note, source=f"autonomous:{self.session_id}", importance=0.65, metadata={"autonomous": True})
         metadata = self.sessions.session_metadata(self.session_id)
         metadata["last_autonomous_report_at"] = now.isoformat()
         self.sessions.update_session_metadata(self.session_id, metadata)

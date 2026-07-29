@@ -8,8 +8,28 @@ from pathlib import Path
 from typing import Any
 
 
+SECRET_METADATA_KEYS = ("api_key", "authorization", "credential", "oauth", "password", "secret", "token")
+
+
 def utcnow() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {
+            str(key): "<redacted>" if any(secret in str(key).lower() for secret in SECRET_METADATA_KEYS) else _json_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(_json_safe(value))
 
 
 @dataclass(frozen=True)
@@ -62,7 +82,7 @@ class SessionStore:
         with self.connect() as conn:
             conn.execute(
                 "insert into sessions(id, title, created_at, updated_at, metadata) values (?, ?, ?, ?, ?)",
-                (session_id, title, now, now, json.dumps(metadata or {})),
+                (session_id, title, now, now, _json_dumps(metadata or {})),
             )
         return session_id
 
@@ -82,15 +102,16 @@ class SessionStore:
         with self.connect() as conn:
             conn.execute(
                 "update sessions set metadata = ?, updated_at = ? where id = ?",
-                (json.dumps(metadata), utcnow(), session_id),
+                (_json_dumps(metadata), utcnow(), session_id),
             )
 
     def add_message(self, session_id: str, role: str, content: str, metadata: dict[str, Any] | None = None) -> int:
         now = utcnow()
+        content = _json_safe(content)
         with self.connect() as conn:
             cursor = conn.execute(
                 "insert into messages(session_id, role, content, created_at, metadata) values (?, ?, ?, ?, ?)",
-                (session_id, role, content, now, json.dumps(metadata or {})),
+                (session_id, role, str(content), now, _json_dumps(metadata or {})),
             )
             conn.execute("update sessions set updated_at = ? where id = ?", (now, session_id))
             return int(cursor.lastrowid)

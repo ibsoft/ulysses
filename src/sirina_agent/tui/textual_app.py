@@ -6,7 +6,27 @@ import shutil
 import subprocess
 from threading import Thread
 
-from sirina_agent.core.artifacts import ArtifactManager, attachment_prompt, is_report_request, should_store_large_paste
+from sirina_agent.core.artifacts import (
+    ArtifactManager,
+    AssessmentProject,
+    assessment_command_for_text,
+    assessment_target,
+    assessment_needs_voice,
+    attachment_prompt,
+    is_assessment_continuation,
+    is_assessment_request,
+    is_final_assessment_report,
+    is_report_request,
+    should_store_large_paste,
+)
+from sirina_agent.core.assessment import (
+    AssessmentCheck,
+    AssessmentResult,
+    assessment_checks,
+    missing_tool_installer_script,
+    missing_tool_packages,
+    render_assessment_report,
+)
 from sirina_agent.config import load_config
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.config.provider_setup import (
@@ -40,6 +60,14 @@ ULYSSES_HEAD = r'''
 ║    <_//||\\_>    ║
 ╚══════════════════╝
 '''
+
+
+class TranscriptLog(RichLog):
+    def get_selection(self, selection) -> tuple[str, str] | None:
+        text = "\n".join(line.text.rstrip() for line in self.lines)
+        if not text:
+            return None
+        return selection.extract(text), "\n"
 
 
 class SudoPasswordScreen(ModalScreen[str | None]):
@@ -273,6 +301,12 @@ class UlyssesTextualApp(App):
         self.transcript_plain: list[str] = []
         self._last_user_text = ""
         self._last_response_wants_report = False
+        self._assessment_project: AssessmentProject | None = None
+        self._assessment_install_attempted = False
+        self._assessment_resume_target: str | None = None
+        self._assessment_pending_check: AssessmentCheck | None = None
+        self._assessment_results: list[AssessmentResult] = []
+        self._assessment_completed_commands: set[str] = set()
         self.theme_name = getattr(orchestrator.config.tui, "theme", "ulysses_dark")
         self._waiting = False
         self._speaking = False
@@ -324,6 +358,7 @@ class UlyssesTextualApp(App):
                     "/confirm [token]\n"
                     "/memory\n"
                     "/context\n"
+                    "/reload\n"
                     "/sessions\n"
                     "/downloads\n"
                     "/theme [name]\n"
@@ -334,7 +369,7 @@ class UlyssesTextualApp(App):
                     classes="muted",
                 )
             with Vertical(id="main"):
-                yield RichLog(id="transcript", wrap=True, highlight=True, markup=True)
+                yield TranscriptLog(id="transcript", wrap=True, highlight=True, markup=True)
                 yield Static("", id="spinner", classes="muted")
                 yield Input(placeholder="Ask Ulysses, paste text, or type /command ...", id="composer")
         yield Footer()
@@ -358,10 +393,59 @@ class UlyssesTextualApp(App):
         if text.startswith("/"):
             self._command(text)
             return
+        if self.orchestrator.pending_tool_requires_sudo_password():
+            pending = self.orchestrator.pending_tool or {}
+            self._open_sudo_password_dialog(pending.get("token"))
+            return
         original_text = text
+        new_assessment = is_assessment_request(original_text)
+        assessment_request = new_assessment or (self._assessment_project is not None and is_assessment_continuation(original_text))
+        if assessment_request and self.orchestrator.pending_tool is not None and not self.orchestrator.pending_tool_requires_sudo_password():
+            self.orchestrator.pending_tool = None
+        if new_assessment:
+            self._assessment_project = self.artifacts.create_assessment_project(self.orchestrator.session_id, original_text)
+            self._assessment_install_attempted = False
+            self._assessment_resume_target = None
+            self._assessment_pending_check = None
+            self._assessment_results = []
+            self._assessment_completed_commands = set()
+        self._set_project_result_capture(self._assessment_project)
         text = self._submission_text_with_attachments(original_text)
+        if self._assessment_project:
+            direct_command = assessment_command_for_text(original_text, _project_request(self._assessment_project))
+            assessment_turn = assessment_request or direct_command is not None
+            if direct_command and not new_assessment:
+                self._last_user_text = original_text
+                self._last_response_wants_report = True
+                self._write_user(original_text)
+                if new_assessment:
+                    self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
+                self._refresh_status()
+                self._start_waiting()
+                target = assessment_target(original_text) or assessment_target(_project_request(self._assessment_project)) or "target"
+                Thread(target=self._assessment_command_in_thread, args=(direct_command, self._assessment_project, target), daemon=True).start()
+                return
+            target = assessment_target(original_text) or assessment_target(_project_request(self._assessment_project))
+            if assessment_turn and target:
+                self._last_user_text = original_text
+                self._last_response_wants_report = True
+                self._write_user(original_text)
+                if new_assessment:
+                    self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
+                self._refresh_status()
+                self._start_waiting()
+                Thread(
+                    target=self._assessment_baseline_in_thread,
+                    args=(self._assessment_project, target, direct_command),
+                    daemon=True,
+                ).start()
+                return
+            if assessment_turn:
+                text = self._assessment_prompt(text, self._assessment_project)
+                if new_assessment:
+                    self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
         self._last_user_text = original_text
-        self._last_response_wants_report = is_report_request(original_text)
+        self._last_response_wants_report = assessment_request or is_report_request(original_text)
         self._write_user(original_text)
         self._refresh_status()
         self._start_waiting()
@@ -411,18 +495,160 @@ class UlyssesTextualApp(App):
             return
         self.call_from_thread(self._finish_answer, answer)
 
+    def _assessment_command_in_thread(self, command: str, project: AssessmentProject | None = None, target: str | None = None) -> None:
+        try:
+            answer, ok = _run_system_command_capture(self.orchestrator, command)
+        except Exception as exc:
+            self.call_from_thread(self._finish_error, str(exc))
+            return
+        if project is not None and target is not None and self.orchestrator.pending_tool is None:
+            try:
+                self.artifacts.save_project_result(project, command, answer)
+                report = _assessment_report_markdown(target, [command], [(command, answer, ok)])
+                artifact = self.artifacts.save_project_markdown_report(project, report)
+                answer = f"{report}\n\nReport saved as Markdown:\n{artifact.path}"
+            except Exception as exc:
+                answer = f"{answer}\n\nReport save failed: {exc}"
+            self.call_from_thread(self._finish_assessment_baseline, answer)
+            return
+        self.call_from_thread(self._finish_answer, answer)
+
+    def _assessment_baseline_in_thread(
+        self,
+        project: AssessmentProject,
+        target: str,
+        preferred_command: str | None = None,
+    ) -> None:
+        checks = assessment_checks(target, preferred_command)
+        results = list(self._assessment_results)
+        for check in checks:
+            if check.command in self._assessment_completed_commands:
+                continue
+            self.call_from_thread(self._set_activity, f"assessment: {check.id}")
+            try:
+                output, ok = _run_system_command_capture(self.orchestrator, check.command)
+            except Exception as exc:
+                output = f"Command failed before execution: {exc}"
+                ok = False
+            try:
+                self.artifacts.save_project_result(project, check.id, output)
+            except Exception:
+                pass
+            if self.orchestrator.pending_tool is not None:
+                results.append(AssessmentResult(check, output, ok))
+                self._assessment_pending_check = check
+                self._assessment_resume_target = target
+                break
+            completed = AssessmentResult(check, output, ok)
+            results.append(completed)
+            self._assessment_results.append(completed)
+            self._assessment_completed_commands.add(check.command)
+        packages = missing_tool_packages(results)
+        if (
+            packages
+            and self.orchestrator.config.skills.command.install_missing_assessment_tools
+            and not self._assessment_install_attempted
+            and self.orchestrator.pending_tool is None
+        ):
+            self._assessment_install_attempted = True
+            missing_commands = {
+                result.check.command
+                for result in self._assessment_results
+                if "command not found:" in result.output.lower()
+            }
+            self._assessment_results = [
+                result for result in self._assessment_results if result.check.command not in missing_commands
+            ]
+            self._assessment_completed_commands.difference_update(missing_commands)
+            installer = self.artifacts.save_project_script(
+                project,
+                "install-missing-tools",
+                missing_tool_installer_script(),
+            )
+            install_check = AssessmentCheck(
+                "install-missing-tools",
+                "Recovery",
+                f"sudo python3 {installer.path} {' '.join(packages)}",
+            )
+            install_output, install_ok = _run_system_command_capture(self.orchestrator, install_check.command)
+            self.artifacts.save_project_result(project, install_check.id, install_output)
+            results.append(AssessmentResult(install_check, install_output, install_ok))
+            if self.orchestrator.pending_tool is not None:
+                self._assessment_pending_check = install_check
+                self._assessment_resume_target = target
+        report = render_assessment_report(target, results)
+        try:
+            artifact = self.artifacts.save_project_markdown_report(project, report)
+            report = f"{report}\n\nReport saved as Markdown:\n{artifact.path}"
+        except Exception as exc:
+            report = f"{report}\n\nReport save failed: {exc}"
+        self.call_from_thread(self._finish_assessment_baseline, report)
+
     def _finish_answer(self, answer: str) -> None:
         self._stop_waiting()
-        if self._last_response_wants_report and self.orchestrator.pending_tool is None:
-            artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
-            answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
+        should_speak = self._should_speak_response(answer)
+        save_final_assessment = self._assessment_project is not None and (
+            is_final_assessment_report(answer) or is_report_request(self._last_user_text)
+        )
+        save_standalone_report = self._assessment_project is None and self._last_response_wants_report
+        if (save_final_assessment or save_standalone_report) and self.orchestrator.pending_tool is None:
+            try:
+                if self._assessment_project:
+                    artifact = self.artifacts.save_project_markdown_report(self._assessment_project, answer)
+                else:
+                    artifact = self.artifacts.save_markdown_report(self.orchestrator.session_id, answer)
+                answer = f"{answer}\n\nReport saved as Markdown:\n{artifact.path}"
+            except Exception as exc:
+                answer = f"{answer}\n\nReport save failed: {exc}"
             self._last_response_wants_report = False
+            if save_final_assessment:
+                self._set_project_result_capture(self._assessment_project)
         self._write_assistant(answer)
         self._refresh_status()
-        self._speak(answer)
+        if self.orchestrator.pending_tool_requires_sudo_password():
+            pending = self.orchestrator.pending_tool or {}
+            token = pending.get("token")
+            self._open_sudo_password_dialog(token)
+        if should_speak:
+            self._speak(answer)
+
+    def _finish_assessment_baseline(self, answer: str) -> None:
+        self._stop_waiting()
+        self._write_assistant(answer)
+        if self.orchestrator.pending_tool is None:
+            self._last_response_wants_report = False
+        self._refresh_status()
+        if self.orchestrator.pending_tool_requires_sudo_password():
+            pending = self.orchestrator.pending_tool or {}
+            token = pending.get("token")
+            self._open_sudo_password_dialog(token)
 
     def _finish_confirmed_tool(self, tool_result: str) -> None:
         self._write_tool(tool_result)
+        if self.orchestrator.pending_tool is not None:
+            self._refresh_status()
+            return
+        if self._assessment_resume_target and self._assessment_project and self._assessment_pending_check:
+            target = self._assessment_resume_target
+            check = self._assessment_pending_check
+            self._assessment_resume_target = None
+            self._assessment_pending_check = None
+            lowered = tool_result.lower()
+            ok = not any(marker in lowered for marker in ("failed", "error", "incorrect password", "not found", "timed out"))
+            completed = AssessmentResult(check, tool_result, ok)
+            self._assessment_results.append(completed)
+            self._assessment_completed_commands.add(check.command)
+            try:
+                self.artifacts.save_project_result(self._assessment_project, check.id, tool_result)
+            except Exception:
+                pass
+            self._start_waiting()
+            Thread(
+                target=self._assessment_baseline_in_thread,
+                args=(self._assessment_project, target),
+                daemon=True,
+            ).start()
+            return
         if not self._last_response_wants_report:
             self._refresh_status()
             return
@@ -472,7 +698,7 @@ class UlyssesTextualApp(App):
         elif cmd == "/confirm":
             token = parts[1] if len(parts) > 1 else None
             if self.orchestrator.pending_tool_requires_sudo_password():
-                self.push_screen(SudoPasswordScreen(), lambda password: self._confirm_with_sudo_password(token, password))
+                self._open_sudo_password_dialog(token)
             else:
                 self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token))
         elif cmd == "/run" and len(parts) > 1:
@@ -483,6 +709,8 @@ class UlyssesTextualApp(App):
             self._autonomous_command(parts)
         elif cmd in {"/status", "/config"}:
             self.action_status()
+        elif cmd == "/reload":
+            self.action_reload_config()
         elif cmd == "/setup":
             self.action_setup()
         elif cmd == "/context":
@@ -519,11 +747,23 @@ class UlyssesTextualApp(App):
         self._refresh_status()
 
     def _confirm_with_sudo_password(self, token: str | None, password: str | None) -> None:
+        composer = self.query_one("#composer", Input)
+        composer.disabled = False
         if password is None:
+            self.orchestrator.cancel_pending_tool()
+            self._assessment_resume_target = None
+            self._assessment_pending_check = None
             self._write_system("Sudo command cancelled.")
+            composer.focus()
             return
         self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token, {"sudo_password": password}))
         self._refresh_status()
+
+    def _open_sudo_password_dialog(self, token: str | None) -> None:
+        composer = self.query_one("#composer", Input)
+        composer.value = ""
+        composer.disabled = True
+        self.push_screen(SudoPasswordScreen(), lambda password: self._confirm_with_sudo_password(token, password))
 
     def _voice_command(self, parts: list[str]) -> None:
         if not self.voice_io:
@@ -564,20 +804,39 @@ class UlyssesTextualApp(App):
         self._command("/new")
 
     def action_clear_transcript(self) -> None:
-        self.query_one("#transcript", RichLog).clear()
+        self.query_one("#transcript", TranscriptLog).clear()
         self.transcript_plain.clear()
         self._write_system("Transcript cleared.")
 
     def action_status(self) -> None:
         cfg = self.orchestrator.config
+        active = _active_command_policy(self.orchestrator)
+        active_allowed = active.allowed if active is not None else set()
         self._write_system(
             f"Session: {self.orchestrator.session_id}\n"
             f"Provider: {cfg.llm.provider} / {cfg.llm.model}\n"
             f"Version: {cfg.agent_version}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
-            f"Godmode: {cfg.skills.command.godmode}"
+            f"Godmode: {cfg.skills.command.godmode}\n"
+            f"Config path: {self.orchestrator.config_path}\n"
+            f"Config allows nikto: {'nikto' in cfg.skills.command.allowed_commands}\n"
+            f"Active policy allows nikto: {'nikto' in active_allowed}"
         )
+
+    def action_reload_config(self) -> None:
+        try:
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self.orchestrator.sync_command_policy_from_config()
+            self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
+        except Exception as exc:
+            self._write_error(f"Config reload failed: {exc}")
+            return
+        self._write_system(
+            f"Config reloaded from {self.orchestrator.config_path}\n"
+            f"nikto allowed: {'nikto' in self.orchestrator.config.skills.command.allowed_commands}"
+        )
+        self._refresh_status()
 
     def action_skills(self) -> None:
         lines = []
@@ -588,6 +847,43 @@ class UlyssesTextualApp(App):
     def _write_downloads(self) -> None:
         files = self.artifacts.list_downloads()
         self._write_system("\n".join(str(path) for path in files) or "No report or attachment files.")
+
+    def _assessment_prompt(self, text: str, project: AssessmentProject) -> str:
+        request = _project_request(project)
+        return (
+            f"{text}\n\n"
+            "Assessment project workspace has been created. Use it to organize this assessment:\n"
+            f"- Initial request: {request}\n"
+            f"- Project root: {project.path}\n"
+            f"- Scripts: {project.scripts_dir}\n"
+            f"- Artifacts: {project.artifacts_dir}\n"
+            f"- Results: {project.results_dir}\n"
+            f"- Reports: {project.reports_dir}\n\n"
+            "Save purpose-built helper scripts under `scripts/`, raw/intermediate outputs under `results/`, "
+            "supporting files under `artifacts/`, and make your final response a Markdown report based on those materials. "
+            "The application will save that final report under `reports/`. "
+            "Proceed with safe baseline checks using the concrete target and current project context. "
+            "Ask only for required authorization, credentials, destructive/intrusive actions, or unclear target identity. "
+            "If this turn approves sudo or installation, call `system_command` with the concrete command now."
+        )
+
+    def _should_speak_response(self, text: str) -> bool:
+        if not self._assessment_project:
+            return True
+        return assessment_needs_voice(text, self.orchestrator.pending_tool is not None)
+
+    def _set_project_result_capture(self, project: AssessmentProject | None) -> None:
+        if not hasattr(self.orchestrator, "set_tool_result_callback"):
+            return
+        if project is None:
+            self.orchestrator.set_tool_result_callback(None)
+            return
+
+        def save_result(name: str, content: str, metadata: dict) -> None:
+            label = str(metadata.get("planned_command") or name)
+            self.artifacts.save_project_result(project, label, content)
+
+        self.orchestrator.set_tool_result_callback(save_result)
 
     def action_setup(self) -> None:
         self.push_screen(ProviderSetupScreen(self.orchestrator.config), self._finish_provider_setup)
@@ -601,6 +897,7 @@ class UlyssesTextualApp(App):
             apply_provider_setup(self.orchestrator.config, config_path, setup)
             load_env_file(env_path_for_config(config_path))
             self.orchestrator.config = load_config(config_path)
+            self.orchestrator.sync_command_policy_from_config()
         except Exception as exc:
             self._write_error(f"Provider setup failed: {exc}")
             self._refresh_status()
@@ -701,11 +998,13 @@ class UlyssesTextualApp(App):
         self.selection_mode = enabled
         if enabled:
             self.query_one("#composer", Input).blur()
+            _set_terminal_mouse_capture(self, False)
             self._write_system(
-                "Selection mode: on. Drag-select with the mouse using your terminal's native selection; "
-                "many terminals copy on selection or with Ctrl+Shift+C."
+                "Selection mode: on. Mouse selection is released to the terminal. "
+                "Drag-select text, then copy with Ctrl+Shift+C or your terminal shortcut."
             )
         else:
+            _set_terminal_mouse_capture(self, True)
             self.query_one("#composer", Input).focus()
             self._write_system("Selection mode: off.")
 
@@ -732,6 +1031,8 @@ class UlyssesTextualApp(App):
             self._refresh_status()
 
     def _refresh_status(self) -> None:
+        if self._speaking and not self._voice_allows_speech():
+            self._stop_speaking_ui()
         voice = "inactive"
         if self.voice_io:
             state = self.voice_io.state
@@ -792,6 +1093,10 @@ class UlyssesTextualApp(App):
         composer.focus()
 
     def _tick_spinner(self) -> None:
+        if self._speaking and not self._voice_allows_speech():
+            self._stop_speaking_ui()
+            self._refresh_status()
+            return
         if self._waiting or self._speaking:
             self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
 
@@ -807,31 +1112,31 @@ class UlyssesTextualApp(App):
             self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
 
     def _write_user(self, text: str) -> None:
-        self.query_one("#transcript", RichLog).write(f"[bold cyan]you[/bold cyan] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(f"[bold cyan]you[/bold cyan] [dim]{_time()}[/dim]\n{text}\n")
         self._append_plain("you", text)
 
     def _write_assistant(self, text: str) -> None:
         self.last_assistant_text = text
-        self.query_one("#transcript", RichLog).write(f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]\n{text}\n")
         self._append_plain("Ulysses", text)
 
     def _write_tool(self, text: str) -> None:
-        self.query_one("#transcript", RichLog).write(f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]\n{text}\n")
         self._append_plain("tool", text)
 
     def _write_system(self, text: str) -> None:
-        self.query_one("#transcript", RichLog).write(f"[bold green]system[/bold green] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(f"[bold green]system[/bold green] [dim]{_time()}[/dim]\n{text}\n")
         self._append_plain("system", text)
 
     def _write_error(self, text: str) -> None:
-        self.query_one("#transcript", RichLog).write(f"[bold red]error[/bold red] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(f"[bold red]error[/bold red] [dim]{_time()}[/dim]\n{text}\n")
         self._append_plain("error", text)
 
     def _append_plain(self, role: str, text: str) -> None:
         self.transcript_plain.append(f"{role} {_time()}\n{text}")
 
     def _speak(self, text: str) -> None:
-        if not self.voice_io or not self.voice_io.state.enabled or self.voice_io.state.muted:
+        if not self._voice_allows_speech():
             return
         self._speech_id += 1
         speech_id = self._speech_id
@@ -841,6 +1146,9 @@ class UlyssesTextualApp(App):
         self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: speaking...")
         self._refresh_status()
         Thread(target=self._speak_in_thread, args=(text, speech_id), daemon=True).start()
+
+    def _voice_allows_speech(self) -> bool:
+        return bool(self.voice_io and self.voice_io.state.enabled and not self.voice_io.state.muted)
 
     def _speak_in_thread(self, text: str, speech_id: int) -> None:
         try:
@@ -891,3 +1199,73 @@ def _system_clipboard_text() -> str:
         if result.returncode == 0 and result.stdout:
             return result.stdout.rstrip("\r\n")
     return ""
+
+
+def _set_terminal_mouse_capture(app, enabled: bool) -> None:
+    driver = getattr(app, "_driver", None)
+    method_name = "_enable_mouse_support" if enabled else "_disable_mouse_support"
+    method = getattr(driver, method_name, None)
+    if callable(method):
+        try:
+            method()
+        except Exception:
+            pass
+
+
+def _active_command_policy(orchestrator):
+    try:
+        return orchestrator.skills.get("system_command").runner.policy
+    except Exception:
+        return None
+
+
+def _run_system_command_capture(orchestrator, command: str) -> tuple[str, bool]:
+    orchestrator.sync_command_policy_from_config(force=True)
+    result = orchestrator._run_skill_result("system_command", {"command": command})
+    if result.requires_confirmation:
+        orchestrator.pending_tool = {"name": "system_command", "arguments": {"command": command}, "token": result.confirmation_token}
+        return result.confirmation_prompt or result.content, False
+    orchestrator._record_tool_result(
+        "system_command",
+        result.content,
+        {"skill": "system_command", "ok": result.ok, "data": result.data, "planned_command": command},
+    )
+    return result.content, bool(result.ok)
+
+
+def _assessment_report_markdown(target: str, commands: list[str], sections: list[tuple]) -> str:
+    checks_by_command = {check.command: check for check in assessment_checks(target)}
+    results = []
+    for index, section in enumerate(sections):
+        command, output, ok = _normalize_assessment_section(section)
+        check = checks_by_command.get(command)
+        if check is None:
+            check = AssessmentCheck(f"requested-check-{index + 1}", "Requested", command)
+        results.append(AssessmentResult(check, output, ok))
+    return render_assessment_report(target, results)
+
+
+def _normalize_assessment_section(section: tuple) -> tuple[str, str, bool]:
+    if len(section) >= 3:
+        return str(section[0]), str(section[1]), bool(section[2])
+    command, output = section
+    output_text = str(output)
+    lowered = output_text.lower()
+    ok = not any(
+        marker in lowered
+        for marker in (
+            "not in the allowlist",
+            "not allowed",
+            "command not found:",
+            "command timed out",
+            "command failed before execution",
+        )
+    )
+    return str(command), output_text, ok
+
+
+def _project_request(project: AssessmentProject) -> str:
+    try:
+        return (project.artifacts_dir / "request.txt").read_text(encoding="utf-8").strip()
+    except Exception:
+        return "current assessment"

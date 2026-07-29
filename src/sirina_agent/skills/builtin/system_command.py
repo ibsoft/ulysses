@@ -17,7 +17,6 @@ class SystemCommandSkill:
                 "command": {"type": "string"},
                 "confirmed": {"type": "boolean"},
                 "confirmation_text": {"type": "string"},
-                "sudo_password": {"type": "string"},
             },
             "required": ["command"],
         },

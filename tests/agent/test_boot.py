@@ -35,8 +35,9 @@ def test_startup_brief_reports_core_systems(tmp_path):
 
     brief = startup_brief(agent)
 
+    assert brief.startswith("Ulysses Cyber Sentinel initializing")
     assert "VAPT / PenTest / Vulnerability Assessment console initialized." in brief
-    assert "LLM Brain: up" in brief
+    assert "Brain: up" in brief
     assert "Memory: up" in brief
     assert "Skills: up" in brief
     assert "Prompt: up" in brief
@@ -55,7 +56,8 @@ def test_spoken_startup_brief_is_short_status_only(tmp_path):
 
     spoken = spoken_startup_brief(agent)
 
-    assert "LLM Brain up." in spoken
+    assert "Brain up." in spoken
+    assert "LLM" not in spoken
     assert "Memory up." in spoken
     assert "Skills up." in spoken
     assert "All systems ready and operational." in spoken

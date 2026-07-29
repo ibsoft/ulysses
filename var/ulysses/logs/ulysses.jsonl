@@ -42,3 +42,7 @@
 {"level": "INFO", "logger": "faiss.loader", "message": "Loading faiss.", "time": "2026-07-27T18:15:52+0300"}
 {"level": "INFO", "logger": "faiss.loader", "message": "Successfully loaded faiss.", "time": "2026-07-27T18:15:52+0300"}
 {"level": "INFO", "logger": "httpx", "message": "HTTP Request: POST https://api.openai.com/v1/chat/completions \"HTTP/1.1 200 OK\"", "time": "2026-07-27T18:16:00+0300"}
+{"level": "INFO", "logger": "faiss.loader", "message": "Loading faiss.", "time": "2026-07-28T12:46:52+0300"}
+{"level": "INFO", "logger": "faiss.loader", "message": "Successfully loaded faiss.", "time": "2026-07-28T12:46:52+0300"}
+{"level": "INFO", "logger": "faiss.loader", "message": "Loading faiss.", "time": "2026-07-28T12:55:45+0300"}
+{"level": "INFO", "logger": "faiss.loader", "message": "Successfully loaded faiss.", "time": "2026-07-28T12:55:45+0300"}

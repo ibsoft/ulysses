@@ -1,4 +1,5 @@
 from sirina_agent.config.models import UlyssesConfig
+import sirina_agent.core.orchestrator as orchestrator_module
 from sirina_agent.core.orchestrator import AgentOrchestrator
 from sirina_agent.llm.providers import MockProvider
 from sirina_agent.memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
@@ -8,6 +9,7 @@ from sirina_agent.skills.registry import SkillRegistry
 from sirina_agent.skills.builtin.system_command import SystemCommandSkill
 from sirina_agent.skills.base import SkillManifest, SkillResult
 import logging
+import time
 
 
 def test_orchestrator_with_mocked_components(tmp_path):
@@ -18,6 +20,34 @@ def test_orchestrator_with_mocked_components(tmp_path):
     agent = AgentOrchestrator(cfg, sessions, memory, MockProvider(), SkillRegistry())
     answer = agent.handle_text("hello")
     assert "Ulysses heard" in answer
+    assert len(sessions.messages(agent.session_id)) == 2
+
+
+class HangingMemoryStore:
+    def __init__(self):
+        self.items = []
+
+    def add(self, *args, **kwargs):
+        time.sleep(2)
+
+    def search(self, *args, **kwargs):
+        return []
+
+    def erase_all(self):
+        self.items.clear()
+
+
+def test_orchestrator_does_not_block_on_slow_memory_save(tmp_path, monkeypatch):
+    monkeypatch.setattr(orchestrator_module, "MEMORY_SAVE_TIMEOUT_SECONDS", 0.01)
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    agent = AgentOrchestrator(cfg, sessions, HangingMemoryStore(), MockProvider(), SkillRegistry())
+
+    started = time.monotonic()
+    answer = agent.handle_text("hello")
+
+    assert "Ulysses heard" in answer
+    assert time.monotonic() - started < 1
     assert len(sessions.messages(agent.session_id)) == 2
 
 
@@ -111,6 +141,35 @@ class MultiToolThenAnswerProvider:
         return {"choices": [{"message": {"role": "assistant", "content": "Combined summary."}}]}
 
 
+class FailedToolThenAnswerProvider:
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        self.messages.append(messages)
+        if self.calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_failed",
+                                    "type": "function",
+                                    "function": {"name": "missing_tool", "arguments": '{"value": "scan"}'},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        return {"choices": [{"message": {"role": "assistant", "content": "Continued with available evidence."}}]}
+
+
 class StaticSearchSkill:
     manifest = SkillManifest(
         name="internet_search",
@@ -178,6 +237,38 @@ def test_orchestrator_pending_tool_confirmation(tmp_path):
     assert str(tmp_path) in result
 
 
+def test_pending_sudo_tool_requests_secure_password_dialog_even_in_godmode(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], require_confirmation=True, godmode=True)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    agent = AgentOrchestrator(cfg, sessions, memory, ToolCallProvider(), registry)
+    agent._run_skill("system_command", {"command": "sudo nmap -sS example.com"})
+
+    assert agent.pending_tool_requires_sudo_password()
+
+
+def test_model_supplied_sudo_password_is_discarded(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], godmode=True)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    agent = AgentOrchestrator(cfg, sessions, memory, ToolCallProvider(), registry)
+
+    result = agent._run_skill_result(
+        "system_command",
+        {"command": "sudo id", "sudo_password": "must-not-be-used-or-stored"},
+    )
+
+    assert result.requires_confirmation
+    assert result.data["sudo_password_required"]
+    assert "must-not-be-used-or-stored" not in repr(result)
+
+
 def test_orchestrator_completes_answer_after_tool_call(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
@@ -214,6 +305,22 @@ def test_orchestrator_runs_multiple_tool_calls_before_final_answer(tmp_path):
     tool_messages = [message for message in final_messages if message["role"] == "tool"]
     assert [message["content"] for message in tool_messages] == ["first result: disk", "second result: filesystem"]
     assert sessions.messages(agent.session_id)[-1].content == answer
+
+
+def test_orchestrator_continues_after_nonfatal_tool_failure(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    provider = FailedToolThenAnswerProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+
+    answer = agent.handle_text("continue even if a tool fails")
+
+    assert answer == "Continued with available evidence."
+    assert provider.calls == 2
+    tool_messages = [message for message in sessions.messages(agent.session_id) if message.role == "tool"]
+    assert tool_messages[0].metadata["ok"] is False
+    assert "missing_tool" in tool_messages[0].content
 
 
 def test_orchestrator_plans_disk_and_filesystem_commands_then_summarizes(tmp_path):
@@ -266,6 +373,10 @@ def test_report_from_tool_result_requests_assessment_report_structure(tmp_path):
     assert "technical proof of concept" in prompt
     assert "detailed remediation" in prompt
     assert "Do not invent vulnerabilities" in prompt
+    assert "Executive Summary" in prompt
+    assert "Management Summary" in prompt
+    assert "Technical Summary" in prompt
+    assert "Exclude missing-tool messages" in prompt
 
 
 def test_orchestrator_reports_activity_during_tool_call(tmp_path):
@@ -397,3 +508,33 @@ def test_autonomous_defense_logs_planned_actions_without_godmode(tmp_path):
     planned = [message for message in sessions.messages(agent.session_id) if message.metadata.get("planned_only")]
     assert any("sudo ufw deny from 10.0.0.7" in message.content for message in planned)
     assert any("sudo apt-get install -y ufw fail2ban auditd" in message.content for message in planned)
+
+
+def test_orchestrator_syncs_system_command_policy_from_config(tmp_path):
+    cfg = UlyssesConfig()
+    cfg.skills.command.allowed_commands = ["pwd"]
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(
+        cfg.skills.command.allowed_commands,
+        cfg.skills.command.denied_commands,
+        tmp_path,
+        cfg.skills.command.env_allowlist,
+        bypass_confirmation_for_allowed_commands=True,
+    )
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    agent = AgentOrchestrator(cfg, sessions, memory, RecordingProvider(), registry)
+    skill = agent.skills.get("system_command")
+
+    assert not skill.runner.policy.evaluate("nikto -host https://example.com -nointeractive").allowed
+
+    agent.config.skills.command.allowed_commands.append("nikto")
+    agent.config.skills.command.timeout_seconds = 123
+    agent.config.skills.command.max_output_chars = 4567
+    assert agent.sync_command_policy_from_config()
+
+    decision = skill.runner.policy.evaluate("nikto -host https://example.com -nointeractive")
+    assert decision.allowed
+    assert skill.runner.timeout_seconds == 123
+    assert skill.runner.max_output_chars == 4567

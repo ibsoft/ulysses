@@ -88,6 +88,12 @@ cd /mnt/data/dev/sirina
 scripts/install-ulysses-linux
 ```
 
+Re-running the installer upgrades the application without deleting runtime projects, reports, sessions, memory, logs,
+or downloaded models. It refreshes the active configuration from the source tree and creates a timestamped backup of
+the previous configuration. Pass `--preserve-config` when an upgrade must retain the active configuration unchanged.
+Use `scripts/install-ulysses-linux --sync-only` to publish development source and configuration without rebuilding the
+virtual environment or checking/downloading models.
+
 This creates:
 
 ```text

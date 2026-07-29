@@ -10,11 +10,12 @@ def startup_brief(orchestrator, voice_io=None) -> str:
     skills_ok, skills_status = _skills_status(orchestrator)
     prompt_ok, prompt_status = _prompt_status(orchestrator)
     lines = [
+        f"{cfg.agent_name} Cyber Sentinel initializing",
         f"{cfg.agent_name} Cyber Sentinel online.",
         "VAPT / PenTest / Vulnerability Assessment console initialized.",
         "",
     ]
-    lines.append(f"LLM Brain: {llm_status}")
+    lines.append(f"Brain: {llm_status}")
     lines.append(f"Memory: {memory_status}")
     lines.append(f"Skills: {skills_status}")
     lines.append(f"Prompt: {prompt_status}")
@@ -34,7 +35,7 @@ def spoken_startup_brief(orchestrator, voice_io=None) -> str:
     skills_ok, _ = _skills_status(orchestrator)
     prompt_ok, _ = _prompt_status(orchestrator)
     checks = [
-        ("LLM Brain", llm_ok),
+        ("Brain", llm_ok),
         ("Memory", memory_ok),
         ("Skills", skills_ok),
         ("Prompt", prompt_ok),

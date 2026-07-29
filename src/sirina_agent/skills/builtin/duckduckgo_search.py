@@ -51,12 +51,17 @@ class DuckDuckGoSearchSkill:
                 results = normalize_results(raw, limit)
                 lines = [f"{idx + 1}. {r['title']}\n{r['url']}\n{r['snippet']}" for idx, r in enumerate(results)]
                 return SkillResult(True, "\n\n".join(lines), {"results": results, "errors": errors})
+        searches = [
+            ("_search_with_ddgs", _search_with_ddgs),
+            ("_search_with_duckduckgo_search", _search_with_duckduckgo_search),
+            ("_search_duckduckgo_html", _search_duckduckgo_html),
+        ]
         for candidate_query in _candidate_queries(query):
-            for search in (_search_with_ddgs, _search_with_duckduckgo_search, _search_duckduckgo_html):
+            for search_name, search in searches:
                 try:
                     provider_results = search(candidate_query, limit)
                 except Exception as exc:
-                    errors.append(f"{search.__name__}({candidate_query!r}): {exc}")
+                    errors.append(f"{search_name}({candidate_query!r}): {exc}")
                     continue
                 if provider_results:
                     raw.extend(provider_results)

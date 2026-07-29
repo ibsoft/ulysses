@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 HIGH_RISK_TOKENS = {
+    "aircrack-ng",
     "rm",
     "rmdir",
     "dd",
@@ -18,14 +19,28 @@ HIGH_RISK_TOKENS = {
     "chmod",
     "chown",
     "pip",
+    "pip3",
+    "pipx",
     "apt",
     "apt-get",
+    "dpkg",
     "systemctl",
     "service",
     "ssh",
     "scp",
-    "curl",
-    "wget",
+    "crackmapexec",
+    "hydra",
+    "john",
+    "hashcat",
+    "masscan",
+    "medusa",
+    "msfconsole",
+    "msfvenom",
+    "netexec",
+    "nuclei",
+    "patator",
+    "sqlmap",
+    "wpscan",
 }
 
 
@@ -66,19 +81,21 @@ class CommandPolicy:
         if not argv:
             return CommandDecision(False, [], "empty command")
         executable = Path(argv[0]).name
-        high_risk = executable in HIGH_RISK_TOKENS or any(token in HIGH_RISK_TOKENS for token in argv[1:])
+        high_risk = executable in HIGH_RISK_TOKENS
         if any(part in {"|", "&&", "||", ";", ">", ">>", "<"} for part in argv):
             if self.godmode and isinstance(command, str):
                 return CommandDecision(True, ["bash", "-lc", command], "allowed by godmode", True, False, False, False)
             return CommandDecision(False, argv, "shell control operators are not allowed", True)
-        if executable == "sudo" and not self.godmode:
+        if executable == "sudo":
+            requires_confirmation = not self.godmode
+            requires_typed_confirmation = self.require_typed_confirmation_for_high_risk and not self.godmode
             return CommandDecision(
                 True,
                 argv,
                 "sudo requires elevated confirmation",
                 True,
-                True,
-                True,
+                requires_confirmation,
+                requires_typed_confirmation,
                 True,
             )
         if executable in self.denied and not self.godmode:
@@ -139,4 +156,28 @@ class CommandRunner:
             return payload
         except subprocess.TimeoutExpired as exc:
             self.audit_logger.warning("command_timeout", extra={"extra": {"argv": argv}})
-            return {"returncode": 124, "stdout": exc.stdout or "", "stderr": "command timed out"}
+            return {
+                "returncode": 124,
+                "stdout": _decode_output(exc.stdout),
+                "stderr": _decode_output(exc.stderr) or "command timed out",
+            }
+        except FileNotFoundError:
+            executable = Path(argv[0]).name
+            self.audit_logger.warning("command_not_found", extra={"extra": {"argv": argv}})
+            return {
+                "returncode": 127,
+                "stdout": "",
+                "stderr": (
+                    f"command not found: {executable}\n"
+                    "If this tool is required for the authorized task, install it with the system package manager "
+                    "or use an available equivalent and continue."
+                ),
+            }
+
+
+def _decode_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
