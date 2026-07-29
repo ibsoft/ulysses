@@ -69,7 +69,7 @@ Default skills:
 - `skills.command.bypass_confirmation_for_allowed_commands`: defaults to `true` and skips prompts for allowlisted non-high-risk commands.
 - `skills.command.godmode`: when set to `true`, gives full local command access. It bypasses the command allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, filtered environment, timeouts, output caps, and audit logging.
 - For multi-step system inspection requests, Ulysses plans separate commands, stores every output as tool history, and then produces one combined summary from the results.
-- `create_skill`: scaffolds new local skills from user requests into `skills.skills_dir`. It requires typed confirmation and creates disabled reviewable skills by default.
+- `create_skill`: researches and generates complete local skills under `skills.skills_dir`. It requires typed confirmation before writing executable code, then enables and registers the skill live.
 
 Sudo behavior:
 
@@ -160,9 +160,13 @@ microphone -> openWakeWord -> Sirina VAD recording -> Sirina STT -> LLM/skills -
 
 The current wake-word adapter is replaceable and intentionally small; if `openwakeword` is unavailable it falls back to push-to-talk/text operation rather than failing the agent.
 
+In the Textual TUI, press `F4`, speak, then pause to transcribe and submit the utterance. Press `F4` again or `Escape`
+to cancel recording. `/talk` provides the same one-shot microphone flow in the Rich fallback. Push-to-talk input is
+independent of `/voice off` and `/mute`, which control spoken responses.
+
 ## Slash Commands
 
-`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
+`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
 
 Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
 
@@ -193,14 +197,17 @@ Commands:
 /***autonomous on
 ```
 
-Create a new skill scaffold:
+Create a complete skill:
 
 ```text
 /create-skill weather_lookup lookup weather for a city
 /confirm <token>
 ```
 
-Ulysses writes `manifest.yaml`, `skill.py`, and `README.md` under the configured `skills.skills_dir`. Review the generated code before enabling it.
+Ulysses researches the request through `internet_search`, combines the sources with the configured model's knowledge,
+generates and statically validates `skill.py`, and requests typed confirmation before installing executable code. It writes
+`manifest.yaml`, `skill.py`, and `README.md` under `skills.skills_dir`, enables the manifest, and loads the skill immediately.
+The active skill appears in the Textual sidebar. `/skills` lists registration state and `/reload` reloads external skills.
 
 When `textual` is installed, Ulysses starts a full-screen TUI with transcript, sidebar status, themes, paste-friendly input, clipboard copy for the last assistant response, and shortcuts:
 

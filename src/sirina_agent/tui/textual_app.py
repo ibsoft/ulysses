@@ -7,6 +7,7 @@ import subprocess
 from threading import Thread
 
 from sirina_agent.core.artifacts import (
+    Artifact,
     ArtifactManager,
     AssessmentProject,
     assessment_command_for_text,
@@ -17,6 +18,8 @@ from sirina_agent.core.artifacts import (
     is_assessment_request,
     is_final_assessment_report,
     is_report_request,
+    is_skill_creation_request,
+    should_attach_clipboard_text,
     should_store_large_paste,
 )
 from sirina_agent.core.assessment import (
@@ -28,6 +31,7 @@ from sirina_agent.core.assessment import (
     render_assessment_report,
 )
 from sirina_agent.config import load_config
+from sirina_agent.tui.branding import ULYSSES_LOGO
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
@@ -47,27 +51,23 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
 
-ULYSSES_HEAD = r'''
-╔══════════════════╗
-║   U L Y S S E S  ║
-║  CYBER SENTINEL  ║
-║      .-^^-.      ║
-║   .-/  /\  \-.   ║
-║  / /  /==\  \ \  ║
-║ | |  | () |  | | ║
-║  \ \  \==/  / /  ║
-║   `-\__\/__/-'   ║
-║    <_//||\\_>    ║
-╚══════════════════╝
-'''
-
-
 class TranscriptLog(RichLog):
     def get_selection(self, selection) -> tuple[str, str] | None:
         text = "\n".join(line.text.rstrip() for line in self.lines)
         if not text:
             return None
         return selection.extract(text), "\n"
+
+
+class ComposerInput(Input):
+    def _on_paste(self, event: Paste) -> None:
+        event.prevent_default()
+        event.stop()
+        if event.text:
+            self.app._handle_composer_paste(event.text)
+
+    def action_paste(self) -> None:
+        self.app.action_paste_clipboard()
 
 
 class SudoPasswordScreen(ModalScreen[str | None]):
@@ -277,10 +277,11 @@ class UlyssesTextualApp(App):
         Binding("ctrl+shift+y", "copy_transcript", "Copy all"),
         Binding("ctrl+s", "selection_mode", "Select"),
         Binding("f2", "cycle_theme", "Theme"),
+        Binding("f4", "push_to_talk", "Talk"),
         Binding("f5", "status", "Status"),
         Binding("f6", "skills", "Skills"),
         Binding("f7", "setup", "Setup"),
-        Binding("escape", "stop_speaking", "Stop voice", show=False),
+        Binding("escape", "stop_speaking", "Stop voice", show=False, priority=True),
     ]
 
     THEMES = ("ulysses_dark", "ulysses_light", "terminal")
@@ -307,9 +308,12 @@ class UlyssesTextualApp(App):
         self._assessment_pending_check: AssessmentCheck | None = None
         self._assessment_results: list[AssessmentResult] = []
         self._assessment_completed_commands: set[str] = set()
+        self._pending_paste: tuple[str, Artifact, str] | None = None
         self.theme_name = getattr(orchestrator.config.tui, "theme", "ulysses_dark")
         self._waiting = False
         self._speaking = False
+        self._listening = False
+        self._listen_cancel_requested = False
         self._speech_id = 0
         self._activity_text = "thinking"
         self._spinner = cycle(self.SPINNER_FRAMES)
@@ -322,7 +326,7 @@ class UlyssesTextualApp(App):
         yield Header(show_clock=True)
         with Horizontal(id="shell"):
             with Vertical(id="sidebar"):
-                yield Static(ULYSSES_HEAD, id="logo")
+                yield Static(ULYSSES_LOGO, id="logo")
                 yield Label(
                     f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version}",
                     id="brand",
@@ -341,6 +345,7 @@ class UlyssesTextualApp(App):
                     "Ctrl+N new session\n"
                     "Ctrl+L clear\n"
                     "F2 theme\n"
+                    "F4 push to talk\n"
                     "F5 status\n"
                     "F6 skills\n"
                     "F7 setup\n"
@@ -350,6 +355,7 @@ class UlyssesTextualApp(App):
                 yield Label("Slash", classes="section-title")
                 yield Static(
                     "/voice on|off\n"
+                    "/talk\n"
                     "/mute\n"
                     "/run <cmd>\n"
                     "/create-skill <name> <request>\n"
@@ -371,11 +377,14 @@ class UlyssesTextualApp(App):
             with Vertical(id="main"):
                 yield TranscriptLog(id="transcript", wrap=True, highlight=True, markup=True)
                 yield Static("", id="spinner", classes="muted")
-                yield Input(placeholder="Ask Ulysses, paste text, or type /command ...", id="composer")
+                yield ComposerInput(placeholder="Ask Ulysses, paste text, or type /command ...", id="composer")
         yield Footer()
 
     def on_mount(self) -> None:
         self._apply_theme(self.theme_name)
+        talk_key = str(getattr(self.orchestrator.config.audio, "push_to_talk_key", "f4")).strip().lower()
+        if talk_key and talk_key != "f4":
+            self.bind(talk_key, "push_to_talk", description="Talk", show=True)
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self._write_system(boot_message)
         self._refresh_status()
@@ -388,16 +397,29 @@ class UlyssesTextualApp(App):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
         event.input.value = ""
-        if not text:
+        self._submit_text(text)
+
+    def _submit_text(self, text: str) -> None:
+        pending_paste = self._pending_paste
+        pasted_artifact: Artifact | None = None
+        display_text = text
+        if pending_paste is not None:
+            pasted_text, pasted_artifact, marker = pending_paste
+            typed_text = text.replace(marker, "").strip()
+            original_text = f"{typed_text}\n\n{pasted_text}".strip() if typed_text else pasted_text
+            display_text = f"{typed_text}\n{marker}".strip()
+            self._pending_paste = None
+        else:
+            original_text = text
+        if not original_text:
             return
-        if text.startswith("/"):
-            self._command(text)
+        if pending_paste is None and original_text.startswith("/"):
+            self._command(original_text)
             return
         if self.orchestrator.pending_tool_requires_sudo_password():
             pending = self.orchestrator.pending_tool or {}
             self._open_sudo_password_dialog(pending.get("token"))
             return
-        original_text = text
         new_assessment = is_assessment_request(original_text)
         assessment_request = new_assessment or (self._assessment_project is not None and is_assessment_continuation(original_text))
         if assessment_request and self.orchestrator.pending_tool is not None and not self.orchestrator.pending_tool_requires_sudo_password():
@@ -410,14 +432,18 @@ class UlyssesTextualApp(App):
             self._assessment_results = []
             self._assessment_completed_commands = set()
         self._set_project_result_capture(self._assessment_project)
-        text = self._submission_text_with_attachments(original_text)
+        text = (
+            attachment_prompt(original_text, pasted_artifact)
+            if pasted_artifact is not None
+            else self._submission_text_with_attachments(original_text)
+        )
         if self._assessment_project:
             direct_command = assessment_command_for_text(original_text, _project_request(self._assessment_project))
             assessment_turn = assessment_request or direct_command is not None
             if direct_command and not new_assessment:
                 self._last_user_text = original_text
                 self._last_response_wants_report = True
-                self._write_user(original_text)
+                self._write_user(display_text)
                 if new_assessment:
                     self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
                 self._refresh_status()
@@ -429,7 +455,7 @@ class UlyssesTextualApp(App):
             if assessment_turn and target:
                 self._last_user_text = original_text
                 self._last_response_wants_report = True
-                self._write_user(original_text)
+                self._write_user(display_text)
                 if new_assessment:
                     self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
                 self._refresh_status()
@@ -445,8 +471,10 @@ class UlyssesTextualApp(App):
                 if new_assessment:
                     self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
         self._last_user_text = original_text
-        self._last_response_wants_report = assessment_request or is_report_request(original_text)
-        self._write_user(original_text)
+        self._last_response_wants_report = assessment_request or (
+            is_report_request(original_text) and not is_skill_creation_request(original_text)
+        )
+        self._write_user(display_text)
         self._refresh_status()
         self._start_waiting()
         Thread(target=self._answer_in_thread, args=(text,), daemon=True).start()
@@ -457,10 +485,9 @@ class UlyssesTextualApp(App):
         text = event.text
         if not text:
             return
-        if "\n" in text:
-            event.prevent_default()
-            event.stop()
-            self._insert_composer_text(text)
+        event.prevent_default()
+        event.stop()
+        self._handle_composer_paste(text)
 
     def action_paste_clipboard(self) -> None:
         if getattr(self.focused, "id", None) != "composer":
@@ -469,7 +496,25 @@ class UlyssesTextualApp(App):
         if not text:
             self._write_system("Clipboard is empty or unavailable.")
             return
-        self._insert_composer_text(text)
+        self._handle_composer_paste(text)
+
+    def _handle_composer_paste(self, text: str) -> None:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not should_attach_clipboard_text(text, self.orchestrator.config.context.max_chars):
+            self._insert_composer_text(text)
+            return
+        composer = self.query_one("#composer", Input)
+        prefix = composer.value
+        if self._pending_paste is not None:
+            previous_text, _, previous_marker = self._pending_paste
+            text = f"{previous_text}\n{text}"
+            prefix = prefix.replace(previous_marker, "").strip()
+        artifact = self.artifacts.save_text_attachment(self.orchestrator.session_id, text)
+        marker = f"[Pasted text attached: {artifact.path.name}, {artifact.chars} chars]"
+        self._pending_paste = (text, artifact, marker)
+        composer.value = f"{prefix} {marker}".strip()
+        composer.cursor_position = len(composer.value)
+        self._write_system(f"Clipboard text saved as attachment:\n{artifact.path}")
 
     def _insert_composer_text(self, text: str) -> None:
         normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
@@ -628,6 +673,15 @@ class UlyssesTextualApp(App):
         if self.orchestrator.pending_tool is not None:
             self._refresh_status()
             return
+        resume_skill = self.orchestrator.consume_skill_resume()
+        if resume_skill:
+            self._start_waiting()
+            Thread(
+                target=self._resume_created_skill_in_thread,
+                args=(resume_skill, self._last_user_text),
+                daemon=True,
+            ).start()
+            return
         if self._assessment_resume_target and self._assessment_project and self._assessment_pending_check:
             target = self._assessment_resume_target
             check = self._assessment_pending_check
@@ -654,6 +708,18 @@ class UlyssesTextualApp(App):
             return
         self._start_waiting()
         Thread(target=self._report_from_tool_in_thread, args=(self._last_user_text, tool_result), daemon=True).start()
+
+    def _resume_created_skill_in_thread(self, skill_name: str, original_request: str) -> None:
+        prompt = (
+            f"Skill `{skill_name}` is now active. Continue the prior request below and use `{skill_name}` now when its "
+            f"capability is applicable. Do not recreate the skill.\n\nPrior request:\n{original_request}"
+        )
+        try:
+            answer = self.orchestrator.handle_text(prompt)
+        except Exception as exc:
+            self.call_from_thread(self._finish_error, str(exc))
+            return
+        self.call_from_thread(self._finish_answer, answer)
 
     def _report_from_tool_in_thread(self, user_request: str, tool_result: str) -> None:
         try:
@@ -704,7 +770,13 @@ class UlyssesTextualApp(App):
         elif cmd == "/run" and len(parts) > 1:
             self._write_tool(self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}))
         elif cmd == "/create-skill" and len(parts) > 2:
-            self._write_tool(self.orchestrator._run_skill("create_skill", {"name": parts[1], "request": " ".join(parts[2:])}))
+            self._start_waiting()
+            Thread(
+                target=self._create_skill_in_thread,
+                args=(parts[1], " ".join(parts[2:])),
+                daemon=True,
+            ).start()
+            return
         elif cmd in {"/autonomous", "/***autonomous"}:
             self._autonomous_command(parts)
         elif cmd in {"/status", "/config"}:
@@ -717,6 +789,8 @@ class UlyssesTextualApp(App):
             self._write_system(str(self.orchestrator.context_usage()))
         elif cmd == "/voice":
             self._voice_command(parts)
+        elif cmd == "/talk":
+            self.action_push_to_talk()
         elif cmd == "/mute":
             self.action_mute_toggle()
         elif cmd == "/say" and len(parts) > 1:
@@ -812,36 +886,46 @@ class UlyssesTextualApp(App):
         cfg = self.orchestrator.config
         active = _active_command_policy(self.orchestrator)
         active_allowed = active.allowed if active is not None else set()
+        configured_allowed = set(cfg.skills.command.allowed_commands)
+        policy_status = "synchronized" if active_allowed == configured_allowed else "mismatch"
         self._write_system(
             f"Session: {self.orchestrator.session_id}\n"
             f"Provider: {cfg.llm.provider} / {cfg.llm.model}\n"
             f"Version: {cfg.agent_version}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
+            f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
             f"Godmode: {cfg.skills.command.godmode}\n"
             f"Config path: {self.orchestrator.config_path}\n"
-            f"Config allows nikto: {'nikto' in cfg.skills.command.allowed_commands}\n"
-            f"Active policy allows nikto: {'nikto' in active_allowed}"
+            f"Command policy: {policy_status}\n"
+            f"Configured allowed commands: {len(configured_allowed)}\n"
+            f"Active allowed commands: {len(active_allowed)}"
         )
 
     def action_reload_config(self) -> None:
         try:
             self.orchestrator.config = load_config(self.orchestrator.config_path)
-            self.orchestrator.sync_command_policy_from_config()
+            if not self.orchestrator.sync_command_policy_from_config(force=True):
+                raise RuntimeError("command policy synchronization failed")
+            loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
             self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
         except Exception as exc:
             self._write_error(f"Config reload failed: {exc}")
             return
         self._write_system(
             f"Config reloaded from {self.orchestrator.config_path}\n"
-            f"nikto allowed: {'nikto' in self.orchestrator.config.skills.command.allowed_commands}"
+            f"External skills loaded: {', '.join(loaded) or 'none'}\n"
+            f"Command allowlist synchronized: {len(set(self.orchestrator.config.skills.command.allowed_commands))} commands"
         )
         self._refresh_status()
 
     def action_skills(self) -> None:
         lines = []
         for manifest in self.orchestrator.skills.manifests():
-            lines.append(f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}")
+            lines.append(f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}  status=ready")
+        for name, manifest, error in self.orchestrator.skills.load_failures():
+            details = f"risk={manifest.risk_level}  enabled={manifest.enabled}" if manifest else "manifest=unavailable"
+            lines.append(f"{name}  {details}  status=load_failed: {error}")
         self._write_system("\n".join(lines) or "No skills registered.")
 
     def _write_downloads(self) -> None:
@@ -943,6 +1027,11 @@ class UlyssesTextualApp(App):
     def action_stop_speaking(self) -> None:
         if not self.voice_io:
             return
+        if self._listening:
+            self._listen_cancel_requested = True
+            self.voice_io.cancel_listen()
+            self._set_activity("stopping microphone")
+            return
         state = self.voice_io.state
         if not self._speaking and state.tts != "speaking":
             return
@@ -951,6 +1040,61 @@ class UlyssesTextualApp(App):
         self._stop_speaking_ui()
         self._write_system("Stopped speaking.")
         self._refresh_status()
+
+    def action_push_to_talk(self) -> None:
+        if not self.voice_io:
+            self._write_system("Voice input is not active. Start without --text-only to use push to talk.")
+            return
+        if self._listening:
+            self._listen_cancel_requested = True
+            self.voice_io.cancel_listen()
+            self._set_activity("stopping microphone")
+            return
+        if self._waiting:
+            self._write_system("Wait for the current operation to finish before recording.")
+            return
+        if self.orchestrator.pending_tool_requires_sudo_password():
+            self._write_system("Complete or cancel the secure sudo prompt before recording.")
+            return
+        if self._speaking or self.voice_io.state.tts == "speaking":
+            self._speech_id += 1
+            self.voice_io.interrupt()
+            self._stop_speaking_ui()
+        self._listening = True
+        self._listen_cancel_requested = False
+        self._activity_text = "listening"
+        composer = self.query_one("#composer", Input)
+        composer.disabled = True
+        self.query_one("#spinner", Static).update("| Ulysses: listening...")
+        self._refresh_status()
+        Thread(target=self._listen_in_thread, daemon=True).start()
+
+    def _listen_in_thread(self) -> None:
+        try:
+            transcript = self.voice_io.listen_once()
+        except Exception as exc:
+            self.call_from_thread(self._finish_listening, "", str(exc))
+            return
+        self.call_from_thread(self._finish_listening, transcript, None)
+
+    def _finish_listening(self, transcript: str, error: str | None) -> None:
+        cancelled = self._listen_cancel_requested
+        self._listening = False
+        self._listen_cancel_requested = False
+        self._activity_text = "idle"
+        self.query_one("#spinner", Static).update("")
+        composer = self.query_one("#composer", Input)
+        composer.disabled = False
+        composer.focus()
+        self._refresh_status()
+        if error:
+            self._write_error(f"Voice input failed: {error}")
+        elif cancelled:
+            self._write_system("Voice input cancelled.")
+        elif transcript.strip():
+            self._submit_text(transcript.strip())
+        else:
+            self._write_system("No speech detected.")
 
     def action_copy_selected_or_last(self) -> None:
         selected = self._selected_text()
@@ -1036,8 +1180,9 @@ class UlyssesTextualApp(App):
         voice = "inactive"
         if self.voice_io:
             state = self.voice_io.state
-            voice = f"{'on' if state.enabled else 'off'} / muted={state.muted} / tts={state.tts}"
+            voice = f"{'on' if state.enabled else 'off'} / muted={state.muted} / stt={state.stt} / tts={state.tts}"
         autonomous = "on" if self.orchestrator.autonomous_enabled() else "off"
+        active_skill = getattr(self.orchestrator, "active_skill", None) or "none"
         context = self.orchestrator.context_usage()
         gauge = _gauge(context["percent"])
         self.query_one("#status", Static).update(
@@ -1047,6 +1192,7 @@ class UlyssesTextualApp(App):
             f"Context\n{gauge} {context['percent']}%\n"
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
+            f"Active skill\n{active_skill}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Theme\n{self.theme_name}"
         )
@@ -1097,8 +1243,14 @@ class UlyssesTextualApp(App):
             self._stop_speaking_ui()
             self._refresh_status()
             return
-        if self._waiting or self._speaking:
-            self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
+        if self._waiting or self._speaking or self._listening:
+            self.query_one("#spinner", Static).update(f"{next(self._spinner)} {self._activity_label()}...")
+
+    def _activity_label(self) -> str:
+        active_skill = getattr(self.orchestrator, "active_skill", None)
+        if active_skill:
+            return f"Ulysses using skill {active_skill}"
+        return f"Ulysses: {self._activity_text}"
 
     def _activity_from_worker(self, message: str) -> None:
         try:
@@ -1108,8 +1260,22 @@ class UlyssesTextualApp(App):
 
     def _set_activity(self, message: str) -> None:
         self._activity_text = message
-        if self._waiting or self._speaking:
-            self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: {self._activity_text}...")
+        if self._waiting or self._speaking or self._listening:
+            self.query_one("#spinner", Static).update(f"{next(self._spinner)} {self._activity_label()}...")
+        self._refresh_status()
+
+    def _create_skill_in_thread(self, name: str, request: str) -> None:
+        try:
+            result = self.orchestrator._run_skill("create_skill", {"name": name, "request": request})
+        except Exception as exc:
+            self.call_from_thread(self._finish_error, str(exc))
+            return
+        self.call_from_thread(self._finish_created_skill, result)
+
+    def _finish_created_skill(self, result: str) -> None:
+        self._stop_waiting()
+        self._write_tool(result)
+        self._refresh_status()
 
     def _write_user(self, text: str) -> None:
         self.query_one("#transcript", TranscriptLog).write(f"[bold cyan]you[/bold cyan] [dim]{_time()}[/dim]\n{text}\n")

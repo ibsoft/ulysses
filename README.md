@@ -295,6 +295,17 @@ Common commands inside the TUI:
 /quit
 ```
 
+### Complete Skill Creation
+
+`/create-skill <name> <request>` starts the complete skill builder. Ulysses searches the internet for implementation and
+security guidance, combines those results with the request and the configured model's knowledge, generates and validates
+the Python implementation, and presents typed confirmation before installing executable code. After confirmation, the
+manifest is enabled and the skill is loaded into the live registry without restarting Ulysses.
+
+Use `/skills` to verify registration. Enabled skills are automatically included in the model's tool definitions, so they
+can be selected from natural-language requests. `/reload` also reloads external skills from `skills.skills_dir`. The TUI
+sidebar shows the active skill while research, generation, or execution is in progress.
+
 Autonomous mode is explicit opt-in. When enabled, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. It logs every check output, detects suspicious evidence such as brute-force attempts and port-scan patterns, adapts check frequency when risk rises, writes a defensive report, and speaks that report when voice is enabled.
 
 If configured to block attackers or install missing security apps, Ulysses plans those system-changing actions. It executes them autonomously only when `skills.command.godmode: true`; otherwise they are logged as planned-only actions.
@@ -326,6 +337,15 @@ By default, Ulysses stores:
 - Runtime and security logs under `var/ulysses/logs`.
 
 Use `/forget <memory_id>` to remove one memory item and `/forget all` to erase sessions and memory.
+
+## Push To Talk
+
+Press `F4` in the Textual TUI, speak, and pause when finished. Ulysses transcribes the utterance and submits it through
+the same command and assessment path used by typed input. Press `F4` again or `Escape` to cancel an active recording.
+Voice input remains available when spoken responses are disabled with `/voice off` or muted with `/mute`.
+
+The Rich fallback supports the same one-shot flow through `/talk`. The Textual key can be supplemented with another
+binding by setting `audio.push_to_talk_key` in `config/ulysses.yaml`; `F4` remains the standard binding.
 
 ## Audio Troubleshooting
 

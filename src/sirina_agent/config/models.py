@@ -26,7 +26,7 @@ class AudioConfig(BaseModel):
     vad_threshold: float | None = None
     silence_seconds: float = 1.1
     max_utterance_seconds: float = 20.0
-    push_to_talk_key: str = "space"
+    push_to_talk_key: str = "f4"
 
 
 class WakeWordConfig(BaseModel):
@@ -141,6 +141,7 @@ class CommandSkillConfig(BaseModel):
             "ffuf",
             "dirsearch",
             "httpx",
+            "katana",
             "subfinder",
             "amass",
             "dnsx",

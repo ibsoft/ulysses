@@ -21,5 +21,5 @@ def test_old_config_inherits_supported_assessment_commands(tmp_path):
     cfg = load_config(config_path)
 
     assert cfg.skills.command.allowed_commands[:2] == ["pwd", "nmap"]
-    for command in ("curl", "whatweb", "sslscan", "nikto", "nuclei"):
+    for command in ("curl", "whatweb", "sslscan", "nikto", "nuclei", "katana"):
         assert command in cfg.skills.command.allowed_commands

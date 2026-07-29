@@ -10,6 +10,7 @@ from typing import Callable
 from .defense import AutonomousDefenseEngine, DefenseCheck
 from ..security.commands import CommandPolicy
 from ..skills.base import SkillResult
+from ..skills.builder import SkillBuildError, build_skill_spec
 
 
 MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
@@ -24,6 +25,8 @@ class AgentOrchestrator:
         self.llm = llm
         self.skills = skills
         self.pending_tool: dict | None = None
+        self.active_skill: str | None = None
+        self.skill_resume_name: str | None = None
         self.activity_callback: Callable[[str], None] | None = None
         self.tool_result_callback: Callable[[str, str, dict], None] | None = None
         self.defense = AutonomousDefenseEngine()
@@ -97,6 +100,14 @@ class AgentOrchestrator:
 
     def handle_text(self, text: str) -> str:
         self._activity("checking request")
+        direct_skill = self._direct_skill_creation(text)
+        if direct_skill:
+            self.sessions.add_message(self.session_id, "user", text)
+            return self._run_skill(
+                "create_skill",
+                {"name": direct_skill[0], "request": direct_skill[1]},
+                resume_after_confirmation=True,
+            )
         direct_plan = self._direct_system_command_plan(text)
         if direct_plan:
             self.sessions.add_message(self.session_id, "user", text)
@@ -126,17 +137,7 @@ class AgentOrchestrator:
                 messages.append({"role": msg.role, "content": msg.content})
             elif msg.role == "tool":
                 messages.append({"role": "system", "content": f"Previous tool result: {msg.content}"})
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": skill.manifest.name,
-                    "description": skill.manifest.description,
-                    "parameters": skill.manifest.arguments_schema,
-                },
-            }
-            for skill in self.skills.enabled()
-        ]
+        tools = self._tool_schemas()
         self._activity("calling my LLM brain")
         response = self.llm.complete(messages, tools=tools)
         message = response["choices"][0]["message"]
@@ -147,6 +148,19 @@ class AgentOrchestrator:
         content = message.get("content") or ""
         self._save_assistant_message(content)
         return content
+
+    def _tool_schemas(self) -> list[dict]:
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": skill.manifest.name,
+                    "description": skill.manifest.description,
+                    "parameters": skill.manifest.arguments_schema,
+                },
+            }
+            for skill in self.skills.enabled()
+        ]
 
     def _maybe_consolidate_session(self) -> None:
         cfg = self.config.context
@@ -229,6 +243,22 @@ class AgentOrchestrator:
             return text.strip()[19:].strip()
         return None
 
+    @staticmethod
+    def _direct_skill_creation(text: str) -> tuple[str, str] | None:
+        request = text
+        if "The user pasted a large text attachment." in text and "Preview:\n" in text:
+            request = text.split("Preview:\n", 1)[1].split("\n\n[The remaining", 1)[0].strip()
+        match = re.search(
+            r"\b(?:create|build|make|generate|implement)\b"
+            r"(?:\s+and\s+activate)?(?:\s+(?:a|an|the))?(?:\s+complete)?\s+skill"
+            r"(?:\s+(?:named|called))?\s+[`'\"]?([A-Za-z][A-Za-z0-9_-]{1,63})",
+            request,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return match.group(1).lower().replace("-", "_"), request
+
     def _direct_system_command_plan(self, text: str) -> list[str] | None:
         lowered = text.strip().lower()
         nmap_target = self._nmap_target(text)
@@ -296,13 +326,22 @@ class AgentOrchestrator:
                 result = self._run_skill_result(name, arguments)
                 if result.requires_confirmation:
                     self._activity(f"waiting for confirmation: {name}")
-                    self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
+                    self.pending_tool = {
+                        "name": name,
+                        "arguments": arguments,
+                        "token": result.confirmation_token,
+                        "resume_after_confirmation": True,
+                    }
                     return result.confirmation_prompt or result.content
                 self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
                 tool_results.append((tool_call_id, name, result.content))
                 last_tool_content = result.content
                 if not result.ok:
                     self._activity(f"tool failed: {name}")
+                    if name == "create_skill":
+                        content = f"Skill creation failed after automated generation and repair attempts: {result.content}"
+                        self._save_assistant_message(content)
+                        return content
                     continue
                 self._activity(f"tool complete: {name}")
 
@@ -311,6 +350,7 @@ class AgentOrchestrator:
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": content})
             self._activity("composing final answer")
             self._activity("calling my LLM brain")
+            tools = self._tool_schemas()
             response = self.llm.complete(messages, tools=tools)
             message = response["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
@@ -327,12 +367,17 @@ class AgentOrchestrator:
         self._save_assistant_message(content)
         return content
 
-    def _run_skill(self, name: str, arguments: dict) -> str:
+    def _run_skill(self, name: str, arguments: dict, resume_after_confirmation: bool = False) -> str:
         self._activity(f"running tool: {name}")
         result = self._run_skill_result(name, arguments)
         if result.requires_confirmation:
             self._activity(f"waiting for confirmation: {name}")
-            self.pending_tool = {"name": name, "arguments": arguments, "token": result.confirmation_token}
+            self.pending_tool = {
+                "name": name,
+                "arguments": arguments,
+                "token": result.confirmation_token,
+                "resume_after_confirmation": resume_after_confirmation,
+            }
             return result.confirmation_prompt or result.content
         self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
         self._activity(f"tool complete: {name}")
@@ -344,14 +389,69 @@ class AgentOrchestrator:
             arguments.pop("sudo_password", None)
         if name == "system_command":
             self.sync_command_policy_from_config(force=False)
+        previous_skill = self.active_skill
+        self.active_skill = name
+        self._activity(f"using skill {name}")
         try:
-            skill = self.skills.get(name)
-        except KeyError:
-            return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": arguments})
-        try:
-            return skill.run(arguments, {"session_id": self.session_id})
+            try:
+                skill = self.skills.get(name)
+            except KeyError:
+                return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": arguments})
+            if name == "create_skill" and not arguments.get("generated_source"):
+                prepared = self._prepare_complete_skill(arguments)
+                if isinstance(prepared, SkillResult):
+                    return prepared
+                arguments.update(prepared)
+            result = skill.run(arguments, {"session_id": self.session_id})
+            if name == "create_skill" and result.ok:
+                try:
+                    loaded_name = self.skills.load_external_skill(Path(result.data["path"]))
+                except Exception as exc:
+                    return SkillResult(
+                        False,
+                        f"Skill files were created but live activation failed: {exc}",
+                        result.data,
+                    )
+                result.content += f" Skill `{loaded_name}` is enabled and available now."
+                result.data["loaded"] = loaded_name
+            return result
         except Exception as exc:
             return SkillResult(False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": arguments, "error": str(exc)})
+        finally:
+            self.active_skill = previous_skill
+
+    def _prepare_complete_skill(self, arguments: dict) -> dict | SkillResult:
+        name = str(arguments.get("name") or "").strip()
+        request = str(arguments.get("request") or "").strip()
+        if not name or not request:
+            return SkillResult(False, "Complete skill creation requires a name and request.")
+        try:
+            search = self.skills.get("internet_search")
+        except KeyError:
+            return SkillResult(False, "Internet search must be enabled to create a complete skill.")
+        self.active_skill = "internet_search"
+        self._activity(f"researching skill: {name}")
+        research_result = search.run(
+            {"query": f"Python implementation documentation and security best practices for {request}", "limit": 5},
+            {"session_id": self.session_id},
+        )
+        self.active_skill = "create_skill"
+        if not research_result.ok:
+            return SkillResult(False, "Skill research did not return usable results; creation was not attempted.")
+        self._activity(f"building skill: {name}")
+        try:
+            spec = build_skill_spec(self.llm, name, request, research_result.content)
+        except SkillBuildError as exc:
+            return SkillResult(False, str(exc))
+        return {
+            "description": spec["description"],
+            "arguments_schema": spec["arguments_schema"],
+            "required_permissions": spec["required_permissions"],
+            "risk_level": spec["risk_level"],
+            "generated_source": spec["source"],
+            "research": research_result.content,
+            "enabled": True,
+        }
 
     def pending_tool_requires_sudo_password(self) -> bool:
         if not self.pending_tool:
@@ -378,12 +478,19 @@ class AgentOrchestrator:
             arguments.update(extra_arguments)
         if confirmation_text:
             arguments["confirmation_text"] = confirmation_text
-        result = self.skills.get(pending["name"]).run(arguments, {"session_id": self.session_id})
+        result = self._run_skill_result(pending["name"], arguments)
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content
         self._record_tool_result(pending["name"], result.content, {"skill": pending["name"], "ok": result.ok, "data": result.data})
+        if pending["name"] == "create_skill" and result.ok and pending.get("resume_after_confirmation"):
+            self.skill_resume_name = str(result.data.get("loaded") or "") or None
         return result.content
+
+    def consume_skill_resume(self) -> str | None:
+        name = self.skill_resume_name
+        self.skill_resume_name = None
+        return name
 
     def cancel_pending_tool(self) -> bool:
         if not self.pending_tool:
