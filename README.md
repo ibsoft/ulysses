@@ -1,6 +1,6 @@
 # Ulysses
 
-Ulysses is a local-first Linux AI voice agent built on Sirina. It combines a terminal UI, OpenAI-compatible LLM providers, local speech-to-text and text-to-speech, persistent sessions, semantic memory, skill execution, and command safety controls into one assistant runtime.
+Ulysses is a local-first Kali/Linux security assistant built on Sirina. It is designed for authorized vulnerability assessment, penetration testing, security-tool operation, evidence collection, remediation guidance, and defensive monitoring of the local host. It combines a terminal UI, OpenAI-compatible LLM providers, local speech-to-text and text-to-speech, persistent sessions, semantic memory, skill execution, and command safety controls into one assistant runtime.
 
 The project also contains Sirina, the reusable local speech toolkit that powers Ulysses voice input and output.
 
@@ -14,8 +14,11 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Loads built-in and local skills through a registry.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
 - Plans multi-step system inspection requests as separate tool operations, stores each output in the session, then summarizes the combined results.
-- Defaults to a Kali/Linux security-assistant prompt for authorized vulnerability assessment, penetration testing, defensive host protection, and remediation.
-- Prefers Markdown assessment reports with severity-ranked findings, evidence, technical proof of concept, impact, detailed remediation, and verification steps.
+- Runs a deterministic external assessment baseline covering asset resolution, HTTP security controls, exposed services, web technologies, TLS configuration, web-server configuration, and vulnerability signatures.
+- Continues after non-fatal failures by using available alternatives, generating focused Python helpers, or requesting secure installation of required tooling when policy permits.
+- Creates a dedicated project for every assessment with separate `scripts/`, `artifacts/`, `results/`, and `reports/` directories.
+- Produces confidential, customer-delivery Markdown reports with Executive, Management, and Technical summaries, severity-ranked findings, evidence, impact, remediation priorities, and objective retest criteria.
+- Keeps operational diagnostics in internal evidence instead of exposing allowlist decisions, installation output, command failures, confirmation prompts, or internal paths in customer reports.
 - Keeps secrets in environment variables or keyring-backed provider configuration rather than YAML.
 
 ## Repository Layout
@@ -77,8 +80,7 @@ The installer creates:
 ~/.local/bin/ulysses
 ```
 
-Sirina model files are downloaded during install when they are missing or invalid.
-Runtime state under `~/.ulysses/app/var/ulysses` starts empty for each install, including sessions, FAISS memory, metadata, and logs.
+Sirina model files are downloaded during install when they are missing or invalid. Re-running the installer preserves runtime state under `~/.ulysses/app/var/ulysses`, including assessment projects, reports, sessions, FAISS memory, metadata, and logs.
 
 Set your API key in `~/.config/ulysses/env`:
 
@@ -190,9 +192,9 @@ Important sections:
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.
 
-The default prompt configures Ulysses as a Kali/Linux vulnerability assessor and penetration-testing assistant for authorized systems. It emphasizes local host defense, evidence-based findings, and specialist coverage for XSS, IDOR/BOLA, authentication and authorization flaws, certificate/TLS issues, cloud security, and local Linux security.
+The default prompt configures Ulysses as a concise Kali/Linux vulnerability assessor and penetration-testing assistant for authorized systems. It treats the machine running Ulysses as a protected host and emphasizes evidence-based findings, remediation guidance, and specialist coverage for XSS, IDOR/BOLA, authentication and authorization flaws, certificate/TLS issues, cloud security, and local Linux security.
 
-For assessed systems, Ulysses should prefer Markdown reports and rank findings by severity: Critical, High, Medium, Low, and Informational. Reports should include scope, methodology, evidence, proof of concept, impact, remediation, verification steps, and assumptions or limitations.
+When a concrete target is supplied, Ulysses proceeds with a safe, main-domain baseline instead of repeatedly asking broad planning questions. It asks only when authorization, credentials, intrusive or destructive activity, or target identity requires a decision. Multi-step requests are executed as a short sequence of tool operations and summarized after the relevant evidence has been collected.
 
 Environment overrides use the `ULYSSES__` prefix. Example:
 
@@ -200,6 +202,62 @@ Environment overrides use the `ULYSSES__` prefix. Example:
 ULYSSES__LLM__PROVIDER=mock
 ULYSSES__AUDIO__ENABLED=false
 ```
+
+## Authorized Assessment Workflow
+
+Ulysses is intended only for systems where the operator has explicit authorization to test. Providing a concrete target starts an external, unauthenticated, non-destructive baseline against the named host. Deeper authenticated, intrusive, exploit-verification, credential, or persistence-related testing requires explicit scope and authorization.
+
+An assessment follows this lifecycle:
+
+1. Create a timestamped project under `var/ulysses/projects/`.
+2. Record the original request and project metadata under `artifacts/`.
+3. Execute independent discovery, network, HTTP, TLS, fingerprinting, configuration, and vulnerability checks.
+4. Store raw command output and intermediate evidence under `results/`.
+5. Continue after non-fatal errors and attempt an available equivalent where practical.
+6. Generate a focused helper under `scripts/` when a small local Python implementation can recover coverage.
+7. When configured, propose one secure, resumable installation cycle for required local tools and continue incomplete checks afterward.
+8. Correlate completed technical evidence, deduplicate observations, assign severity, and write the final customer report under `reports/`.
+
+Operational failures remain available to the operator in internal project evidence. They are not represented as successful checks or customer findings.
+
+### Assessment Project Layout
+
+```text
+var/ulysses/projects/<session>_<timestamp>_<target>/
+|-- README.md
+|-- scripts/       Generated helpers and recovery utilities
+|-- artifacts/     Request, scope, metadata, and supporting inputs
+|-- results/       Raw output and internal operational evidence
+`-- reports/       Final customer-delivery Markdown reports
+```
+
+## Customer-Delivery Reports
+
+Final assessment reports are classified **Confidential - Customer Delivery** and use stable finding identifiers. Reports include:
+
+- Document control, report reference, target, assessment profile, issue date, status, and distribution classification.
+- Executive Summary for decision makers.
+- Management Summary with overall risk and governance priorities.
+- Technical Summary and severity-count risk profile.
+- Scope, engagement boundaries, methodology, and severity definitions.
+- Findings register ordered Critical, High, Medium, Low, and Informational.
+- Detailed findings with affected asset, evidence confidence, description, technical evidence or proof of concept, business impact, technical impact, actionable remediation, and objective retest criteria.
+- Prioritized remediation roadmap, retest and closure requirements, technical evidence appendix, assumptions and limitations, and confidentiality notice.
+
+Customer reports intentionally exclude missing-tool messages, allowlist denials, installation output, command failures, confirmation prompts, internal filesystem paths, and other operator diagnostics. Those records remain in the project's internal `results/` directory for traceability.
+
+Report filenames contain `customer-vulnerability-assessment-report.md` and are available through `/downloads`.
+
+## Privileged Commands And Credentials
+
+Ulysses never asks for a sudo password in ordinary chat. When an approved operation requires privilege:
+
+1. The agent submits the exact `sudo ...` command through `system_command`.
+2. The TUI disables the normal composer and opens a dedicated masked password dialog.
+3. The password is supplied to `sudo` over standard input and is not included in the transcript, model context, tool schema, session metadata, project evidence, or audit command arguments.
+4. Cancelling the dialog cancels the pending privileged operation.
+
+API keys and provider tokens belong in `~/.config/ulysses/env` or provider authentication storage. Do not place credentials in assessment prompts, YAML files, project artifacts, or normal chat messages.
 
 ## Slash Commands
 
@@ -215,15 +273,24 @@ Common commands inside the TUI:
 /forget all
 /skills
 /config
+/status
+/reload
 /voice on
 /voice off
 /mute
 /theme
 /theme list
+/run <command>
 /create-skill <name> <request>
+/confirm [token]
+/downloads
+/copy selected
+/copy all
+/select on
+/select off
+/setup
 /autonomous on
 /autonomous off
-/status
 /export
 /quit
 ```
@@ -243,7 +310,9 @@ Ulysses treats local command execution as a privileged capability.
 - `bypass_confirmation_for_allowed_commands: true` is the default and skips prompts for allowlisted non-high-risk commands.
 - Execution uses a configured working directory, timeout, environment allowlist, and output cap.
 - Audit events are written under `var/ulysses/logs` by default.
-- Secrets are expected to live in environment variables or provider authentication storage, not in YAML.
+- Sudo passwords are accepted only through a masked TUI dialog and are excluded from normal chat, model-visible tool schemas, session metadata, and audit arguments.
+- Secret-bearing metadata keys are recursively redacted before persistence.
+- API keys and provider tokens are expected to live in environment variables or provider authentication storage, not in YAML.
 
 `skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
 
