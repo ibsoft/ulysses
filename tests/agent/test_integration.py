@@ -529,12 +529,64 @@ def test_orchestrator_syncs_system_command_policy_from_config(tmp_path):
 
     assert not skill.runner.policy.evaluate("nikto -host https://example.com -nointeractive").allowed
 
-    agent.config.skills.command.allowed_commands.append("nikto")
+    agent.config.skills.command.allowed_commands.extend(["nikto", "nuclei", "sslscan", "katana"])
     agent.config.skills.command.timeout_seconds = 123
     agent.config.skills.command.max_output_chars = 4567
     assert agent.sync_command_policy_from_config()
 
     decision = skill.runner.policy.evaluate("nikto -host https://example.com -nointeractive")
     assert decision.allowed
+    assert skill.runner.policy.allowed == set(agent.config.skills.command.allowed_commands)
+    assert skill.runner.policy.evaluate("nuclei -u https://example.com").allowed
+    assert skill.runner.policy.evaluate("sslscan example.com:443").allowed
+    assert skill.runner.policy.evaluate("katana -u https://example.com").allowed
     assert skill.runner.timeout_seconds == 123
     assert skill.runner.max_output_chars == 4567
+
+
+def test_explicit_skill_creation_is_directly_routed_from_attachment_preview():
+    text = (
+        "The user pasted a large text attachment.\n"
+        "Saved file: /tmp/paste.txt\n"
+        "Characters: 200\n"
+        "Preview:\n"
+        "Create and activate a complete skill named network_reachability.\n\n"
+        "Check authorized network 192.168.1.0/24.\n\n"
+        "[The remaining 0 characters are saved in the file above.]"
+    )
+
+    routed = AgentOrchestrator._direct_skill_creation(text)
+
+    assert routed == (
+        "network_reachability",
+        "Create and activate a complete skill named network_reachability.\n\n"
+        "Check authorized network 192.168.1.0/24.",
+    )
+
+
+def test_handle_text_bypasses_model_for_explicit_skill_creation():
+    calls = []
+
+    class RecordingSessions:
+        def add_message(self, *args):
+            calls.append(("session", args))
+
+    orchestrator = object.__new__(AgentOrchestrator)
+    orchestrator.activity_callback = None
+    orchestrator.sessions = RecordingSessions()
+    orchestrator.session_id = "test-session"
+    orchestrator._run_skill = lambda name, arguments, resume_after_confirmation=False: calls.append(
+        (name, arguments, resume_after_confirmation)
+    ) or "skill routed"
+
+    result = orchestrator.handle_text("Create and activate a complete skill named network_reachability. Check my LAN.")
+
+    assert result == "skill routed"
+    assert calls[-1] == (
+        "create_skill",
+        {
+            "name": "network_reachability",
+            "request": "Create and activate a complete skill named network_reachability. Check my LAN.",
+        },
+        True,
+    )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 import time
+from threading import Event
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ def record_utterance(
     max_seconds: float = LISTEN_MAX_SECONDS,
     speech_start_timeout_s: float = LISTEN_SPEECH_START_TIMEOUT_SECONDS,
     input_device: int | str | None = None,
+    stop_event: Event | None = None,
 ) -> NDArray[np.float32]:
     """Record one utterance from the default microphone using Silero VAD."""
     from .audio_io import get_audio_system
@@ -95,6 +97,8 @@ def record_utterance(
     audio_io.start_listening()
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             now = time.time()
             if now - started_at > max_seconds:
                 break

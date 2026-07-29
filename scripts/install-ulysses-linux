@@ -34,162 +34,229 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
   fi
 fi
 
-spin() {
-  local pid="$1"
-  local message="$2"
-  local frames='|/-\'
-  local i=0
-  while kill -0 "$pid" 2>/dev/null; do
-    printf "\r[%s] %s" "${frames:i++%${#frames}:1}" "$message"
-    sleep 0.1
-  done
-  wait "$pid"
-  printf "\r[ok] %s\n" "$message"
-}
+INTERACTIVE=false
+ACCENT=''
+SUCCESS=''
+ERROR=''
+MUTED=''
+RESET=''
+if [[ -t 1 ]]; then
+  INTERACTIVE=true
+  if [[ -z "${NO_COLOR:-}" ]]; then
+    ACCENT=$'\033[38;5;208m'
+    SUCCESS=$'\033[38;5;82m'
+    ERROR=$'\033[38;5;196m'
+    MUTED=$'\033[38;5;245m'
+    RESET=$'\033[0m'
+  fi
+fi
 
-step() {
-  printf "\n==> %s\n" "$1"
+TOTAL_STEPS=10
+if [[ "${SYNC_ONLY}" == true ]]; then
+  TOTAL_STEPS=6
+fi
+CURRENT_STEP=0
+
+run_animated() {
+  local message="$1"
+  shift
+  local log_file
+  local pid
+  local status
+  local frame
+  local i=0
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  log_file="$(mktemp "${TMPDIR:-/tmp}/ulysses-install.XXXXXX")"
+  "$@" >"${log_file}" 2>&1 &
+  pid=$!
+
+  if [[ "${INTERACTIVE}" == true ]]; then
+    while kill -0 "${pid}" 2>/dev/null; do
+      frame="${frames[i++ % ${#frames[@]}]}"
+      printf "\r\033[2K%s%s%s  [%02d/%02d] %s" "${ACCENT}" "${frame}" "${RESET}" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}"
+      sleep 0.08
+    done
+  else
+    printf "[..] [%02d/%02d] %s\n" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}"
+  fi
+
+  if wait "${pid}"; then
+    if [[ "${INTERACTIVE}" == true ]]; then
+      printf "\r\033[2K%s✓%s  [%02d/%02d] %s\n" "${SUCCESS}" "${RESET}" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}"
+    else
+      printf "[ok] [%02d/%02d] %s\n" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}"
+    fi
+    rm -f "${log_file}"
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "${INTERACTIVE}" == true ]]; then
+    printf "\r\033[2K%s✗%s  [%02d/%02d] %s\n" "${ERROR}" "${RESET}" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}" >&2
+  else
+    printf "[failed] [%02d/%02d] %s\n" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}" >&2
+  fi
+  sed 's/^/    /' "${log_file}" >&2
+  rm -f "${log_file}"
+  exit "${status}"
 }
 
 print_logo() {
+  printf '%s' "${ACCENT}"
   cat <<'EOF'
 
-╔══════════════════════════════════════╗
-║          U L Y S S E S               ║
-║       CYBER SENTINEL INSTALL         ║
-║                                      ║
-║             .-^^^^^^^^-.             ║
-║          .-/    /\      \-.          ║
-║        ./ /    /==\      \ \.        ║
-║       /  /    | () |      \  \       ║
-║       \  \     \==/       /  /       ║
-║        `-.\____/\/\____/.-'          ║
-║             <_// || \\_>             ║
-║              local-first             ║
-╚══════════════════════════════════════╝
+╭────────────────────────────────────────────────────╮
+│                                                    │
+│              U L Y S S E S                         │
+│              CYBER  SENTINEL                       │
+│                                                    │
+│                    ╱╲  ╱╲                          │
+│                 ╭──╯◆  ◆╰──╮                       │
+│                 │     ◇    │                       │
+│                 ╰─╮  ╱╲  ╭─╯                       │
+│                   ╰─┬──┬─╯                         │
+│                 ════╧══╧════                       │
+│                                                    │
+│            LOCAL-FIRST SECURITY AGENT              │
+│                  INSTALLATION                      │
+│                                                    │
+╰────────────────────────────────────────────────────╯
 EOF
+  printf '%s' "${RESET}"
 }
 
 print_logo
+printf "%sDeployment%s  %s mode  •  Python %s\n\n" "${MUTED}" "${RESET}" "$([[ "${SYNC_ONLY}" == true ]] && printf 'sync' || printf 'full install')" "${PYTHON_BIN}"
 
-step "Creating Ulysses directories in ${HOME}"
-mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
+prepare_directories() {
+  mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
+}
 
-step "Copying Ulysses files to ${APP_SOURCE}"
-if [[ "${PROJECT_ROOT}" != "${APP_SOURCE}" ]]; then
-  MODEL_BACKUP=""
-  RUNTIME_BACKUP=""
-  if [[ -d "${APP_SOURCE}/models" ]]; then
-    MODEL_BACKUP="${APP_HOME}/.models.backup.$$"
-    mv "${APP_SOURCE}/models" "${MODEL_BACKUP}"
+sync_application() {
+  if [[ "${PROJECT_ROOT}" != "${APP_SOURCE}" ]]; then
+    MODEL_BACKUP=""
+    RUNTIME_BACKUP=""
+    SKILLS_BACKUP=""
+    if [[ -d "${APP_SOURCE}/models" ]]; then
+      MODEL_BACKUP="${APP_HOME}/.models.backup.$$"
+      mv "${APP_SOURCE}/models" "${MODEL_BACKUP}"
+    fi
+    if [[ -d "${APP_SOURCE}/var/ulysses" ]]; then
+      RUNTIME_BACKUP="${APP_HOME}/.runtime.backup.$$"
+      mv "${APP_SOURCE}/var/ulysses" "${RUNTIME_BACKUP}"
+    fi
+    if [[ -d "${APP_SOURCE}/skills" ]]; then
+      SKILLS_BACKUP="${APP_HOME}/.skills.backup.$$"
+      mv "${APP_SOURCE}/skills" "${SKILLS_BACKUP}"
+    fi
+    rm -rf "${APP_SOURCE}"
+    mkdir -p "${APP_SOURCE}"
+    cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"
+    rm -rf "${APP_SOURCE}/var/ulysses"
+    if [[ -n "${MODEL_BACKUP}" ]]; then
+      rm -rf "${APP_SOURCE}/models"
+      mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
+    fi
+    if [[ -n "${RUNTIME_BACKUP}" ]]; then
+      mkdir -p "${APP_SOURCE}/var"
+      mv "${RUNTIME_BACKUP}" "${APP_SOURCE}/var/ulysses"
+    fi
+    if [[ -n "${SKILLS_BACKUP}" ]]; then
+      rm -rf "${APP_SOURCE}/skills"
+      mv "${SKILLS_BACKUP}" "${APP_SOURCE}/skills"
+    fi
   fi
-  if [[ -d "${APP_SOURCE}/var/ulysses" ]]; then
-    RUNTIME_BACKUP="${APP_HOME}/.runtime.backup.$$"
-    mv "${APP_SOURCE}/var/ulysses" "${RUNTIME_BACKUP}"
-  fi
-  rm -rf "${APP_SOURCE}"
-  mkdir -p "${APP_SOURCE}"
-  cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"
-  rm -rf "${APP_SOURCE}/var/ulysses"
-  if [[ -n "${MODEL_BACKUP}" ]]; then
-    rm -rf "${APP_SOURCE}/models"
-    mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
-  fi
-  if [[ -n "${RUNTIME_BACKUP}" ]]; then
-    mkdir -p "${APP_SOURCE}/var"
-    mv "${RUNTIME_BACKUP}" "${APP_SOURCE}/var/ulysses"
-  fi
-fi
-mkdir -p "${APP_SOURCE}/var/ulysses/logs"
+  mkdir -p "${APP_SOURCE}/var/ulysses/logs"
+}
 
-if [[ "${SYNC_ONLY}" == true ]]; then
-  if [[ ! -x "${APP_HOME}/venv/bin/ulysses" ]]; then
-    printf "error: --sync-only requires an existing installation at %s\n" "${APP_HOME}" >&2
-    exit 1
-  fi
-  printf "[ok] Existing virtual environment and models preserved\n"
-else
-  if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-    printf "error: Python executable not found: %s\n" "${PYTHON_BIN}" >&2
-    exit 1
-  fi
-
-  if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-    printf "error: Ulysses requires Python 3.11 or newer, but %s is " "${PYTHON_BIN}" >&2
+validate_python() {
+  command -v "${PYTHON_BIN}" >/dev/null 2>&1 || {
+    printf "Python executable not found: %s\n" "${PYTHON_BIN}" >&2
+    return 1
+  }
+  "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' || {
+    printf "Ulysses requires Python 3.11 or newer. Found: " >&2
     "${PYTHON_BIN}" --version >&2
-    printf "\nInstall Python 3.11+, or rerun with PYTHON_BIN=/path/to/python3.11 %s\n" "$0" >&2
-    exit 1
-  fi
+    return 1
+  }
+}
 
-  step "Creating virtual environment"
+prepare_virtual_environment() {
   if [[ -x "${APP_HOME}/venv/bin/python" ]] &&
     ! "${APP_HOME}/venv/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-    printf "error: existing virtual environment uses " >&2
+    printf "Existing virtual environment is older than Python 3.11: " >&2
     "${APP_HOME}/venv/bin/python" --version >&2
-    printf "\nRemove %s/venv and rerun with Python 3.11 or newer.\n" "${APP_HOME}" >&2
-    exit 1
+    return 1
   fi
-  "${PYTHON_BIN}" -m venv "${APP_HOME}/venv" &
-  spin "$!" "virtual environment ready"
+  "${PYTHON_BIN}" -m venv "${APP_HOME}/venv"
+}
 
-  step "Upgrading pip"
-  "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip &
-  spin "$!" "pip upgraded"
-
-  step "Installing Ulysses from copied files"
-  "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]" &
-  spin "$!" "Ulysses installed"
-
-  step "Checking Sirina models"
+prepare_models() {
   if "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" check-models --group all >/dev/null 2>&1; then
-    printf "[ok] Sirina models ready\n"
-  else
-    "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all &
-    spin "$!" "Sirina models downloaded"
+    return 0
   fi
+  "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all
+}
+
+run_animated "Preparing installation directories" prepare_directories
+run_animated "Synchronizing application source" sync_application
+
+if [[ "${SYNC_ONLY}" == true ]]; then
+  verify_existing_install() {
+    [[ -x "${APP_HOME}/venv/bin/ulysses" ]] || {
+      printf "--sync-only requires an existing installation at %s\n" "${APP_HOME}" >&2
+      return 1
+    }
+  }
+  run_animated "Preserving existing environment and models" verify_existing_install
+else
+  run_animated "Validating Python 3.11+" validate_python
+  run_animated "Preparing isolated Python environment" prepare_virtual_environment
+  run_animated "Upgrading Python package tooling" "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip
+  run_animated "Installing Ulysses and agent dependencies" "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]"
+  run_animated "Checking and preparing Sirina voice models" prepare_models
 fi
 
-step "Writing default configuration"
-if [[ -f "${CONFIG_HOME}/ulysses.yaml" && "${PRESERVE_CONFIG}" == false ]]; then
-  CONFIG_BACKUP="${CONFIG_HOME}/ulysses.yaml.backup-$(date +%Y%m%d-%H%M%S)"
-  cp -p "${CONFIG_HOME}/ulysses.yaml" "${CONFIG_BACKUP}"
-  cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
-  printf "[ok] Configuration refreshed; previous file saved as %s\n" "${CONFIG_BACKUP}"
-elif [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
-  cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
-else
-  printf "[ok] Existing configuration preserved by request\n"
-fi
-if grep -q '^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$' "${CONFIG_HOME}/ulysses.yaml"; then
-  sed -i 's/^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$/  tts_voice: am_michael/' "${CONFIG_HOME}/ulysses.yaml"
-fi
-if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
-  sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"
-fi
-# The loader unions legacy allowlists with the supported command set. Keep the
-# user file intact here so upgrades do not overwrite local security settings.
-if ! grep -q '^[[:space:]]*defense_checks_enabled:' "${CONFIG_HOME}/ulysses.yaml"; then
-  sed -i '/^[[:space:]]*max_recent_messages:/a\  defense_checks_enabled: true\n  defense_elevated_interval_seconds: 45\n  defense_critical_interval_seconds: 15\n  defense_report_min_score: 0\n  auto_block_attackers: true\n  install_missing_security_apps: true' "${CONFIG_HOME}/ulysses.yaml"
-fi
-if ! grep -q '^[[:space:]]*auto_block_attackers:' "${CONFIG_HOME}/ulysses.yaml"; then
-  sed -i '/^[[:space:]]*defense_report_min_score:/a\  auto_block_attackers: true\n  install_missing_security_apps: true' "${CONFIG_HOME}/ulysses.yaml"
-fi
-if [[ ! -f "${CONFIG_HOME}/env" ]]; then
-  cp "${APP_SOURCE}/.env.example" "${CONFIG_HOME}/env"
-  chmod 600 "${CONFIG_HOME}/env"
-fi
-if grep -q '^SIRINA_MODEL_DIR=' "${CONFIG_HOME}/env"; then
-  sed -i "s|^SIRINA_MODEL_DIR=.*|SIRINA_MODEL_DIR=${MODEL_HOME}|" "${CONFIG_HOME}/env"
-else
-  printf "\nSIRINA_MODEL_DIR=%s\n" "${MODEL_HOME}" >>"${CONFIG_HOME}/env"
-fi
-mkdir -p "${CONFIG_HOME}/prompts"
-if [[ -f "${APP_SOURCE}/prompts/ulysses_system.md" && ! -f "${CONFIG_HOME}/prompts/ulysses_system.md" ]]; then
-  cp "${APP_SOURCE}/prompts/ulysses_system.md" "${CONFIG_HOME}/prompts/ulysses_system.md"
-fi
+write_configuration() {
+  if [[ -f "${CONFIG_HOME}/ulysses.yaml" && "${PRESERVE_CONFIG}" == false ]]; then
+    CONFIG_BACKUP="${CONFIG_HOME}/ulysses.yaml.backup-$(date +%Y%m%d-%H%M%S)"
+    cp -p "${CONFIG_HOME}/ulysses.yaml" "${CONFIG_BACKUP}"
+    cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+  elif [[ ! -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
+    cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  if grep -q '^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$' "${CONFIG_HOME}/ulysses.yaml"; then
+    sed -i 's/^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$/  tts_voice: am_michael/' "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
+    sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  # Keep local security settings while adding newly required defaults.
+  if ! grep -q '^[[:space:]]*defense_checks_enabled:' "${CONFIG_HOME}/ulysses.yaml"; then
+    sed -i '/^[[:space:]]*max_recent_messages:/a\  defense_checks_enabled: true\n  defense_elevated_interval_seconds: 45\n  defense_critical_interval_seconds: 15\n  defense_report_min_score: 0\n  auto_block_attackers: true\n  install_missing_security_apps: true' "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  if ! grep -q '^[[:space:]]*auto_block_attackers:' "${CONFIG_HOME}/ulysses.yaml"; then
+    sed -i '/^[[:space:]]*defense_report_min_score:/a\  auto_block_attackers: true\n  install_missing_security_apps: true' "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  if [[ ! -f "${CONFIG_HOME}/env" ]]; then
+    cp "${APP_SOURCE}/.env.example" "${CONFIG_HOME}/env"
+    chmod 600 "${CONFIG_HOME}/env"
+  fi
+  if grep -q '^SIRINA_MODEL_DIR=' "${CONFIG_HOME}/env"; then
+    sed -i "s|^SIRINA_MODEL_DIR=.*|SIRINA_MODEL_DIR=${MODEL_HOME}|" "${CONFIG_HOME}/env"
+  else
+    printf "\nSIRINA_MODEL_DIR=%s\n" "${MODEL_HOME}" >>"${CONFIG_HOME}/env"
+  fi
+  mkdir -p "${CONFIG_HOME}/prompts"
+  if [[ -f "${APP_SOURCE}/prompts/ulysses_system.md" && ! -f "${CONFIG_HOME}/prompts/ulysses_system.md" ]]; then
+    cp "${APP_SOURCE}/prompts/ulysses_system.md" "${CONFIG_HOME}/prompts/ulysses_system.md"
+  fi
+}
 
-step "Creating launcher"
-cat >"${BIN_HOME}/ulysses" <<EOF
+create_launcher() {
+  cat >"${BIN_HOME}/ulysses" <<EOF
 #!/usr/bin/env bash
 set -a
 [[ -f "${CONFIG_HOME}/env" ]] && source "${CONFIG_HOME}/env"
@@ -198,11 +265,24 @@ export SIRINA_MODEL_DIR="${MODEL_HOME}"
 cd "${APP_SOURCE}"
 exec "${APP_HOME}/venv/bin/ulysses" --config "${CONFIG_HOME}/ulysses.yaml" "\$@"
 EOF
-chmod +x "${BIN_HOME}/ulysses"
+  chmod +x "${BIN_HOME}/ulysses"
+}
+
+verify_installation() {
+  [[ -x "${BIN_HOME}/ulysses" ]]
+  [[ -x "${APP_HOME}/venv/bin/ulysses" ]]
+  [[ -f "${CONFIG_HOME}/ulysses.yaml" ]]
+}
+
+run_animated "Applying configuration and secure defaults" write_configuration
+run_animated "Creating the Ulysses command launcher" create_launcher
+run_animated "Verifying installation integrity" verify_installation
 
 cat <<EOF
 
-Ulysses installed for the current user.
+${SUCCESS}╭────────────────────────────────────────────────────╮${RESET}
+${SUCCESS}│  ✓  ULYSSES DEPLOYMENT COMPLETE                    │${RESET}
+${SUCCESS}╰────────────────────────────────────────────────────╯${RESET}
 
 App:     ${APP_SOURCE}
 Models:  ${MODEL_HOME}
@@ -213,6 +293,5 @@ Command: ${BIN_HOME}/ulysses
 Add this to your shell profile if needed:
   export PATH="\$HOME/.local/bin:\$PATH"
 
-Set OPENAI_API_KEY in ${CONFIG_HOME}/env, then run:
-  ulysses
+${ACCENT}Launch:${RESET}  ulysses
 EOF

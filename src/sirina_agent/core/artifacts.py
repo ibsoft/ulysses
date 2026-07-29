@@ -107,6 +107,11 @@ def should_store_large_paste(text: str, context_max_chars: int) -> bool:
     return len(text) > threshold
 
 
+def should_attach_clipboard_text(text: str, context_max_chars: int) -> bool:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n" in normalized or should_store_large_paste(normalized, context_max_chars)
+
+
 def attachment_prompt(original_text: str, artifact: Artifact, preview_chars: int = 4_000) -> str:
     preview = original_text[:preview_chars].strip()
     omitted = max(0, len(original_text) - len(preview))
@@ -124,6 +129,14 @@ def is_report_request(text: str) -> bool:
     return bool(
         re.search(r"\b(report|write[- ]?up|briefing|markdown file|download|downloadable)\b|\.md\b", lowered)
         and re.search(r"\b(make|create|write|generate|prepare|give)\b", lowered)
+    )
+
+
+def is_skill_creation_request(text: str) -> bool:
+    lowered = " ".join(text.lower().split())
+    return bool(
+        re.search(r"\b(create|build|make|generate|implement)\b.{0,80}\bskill\b", lowered)
+        or re.search(r"\bskill\b.{0,80}\b(create|build|make|generate|implement)\b", lowered)
     )
 
 

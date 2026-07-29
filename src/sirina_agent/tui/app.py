@@ -13,6 +13,7 @@ from sirina_agent.core.artifacts import (
     is_assessment_request,
     is_final_assessment_report,
     is_report_request,
+    is_skill_creation_request,
     should_store_large_paste,
 )
 from sirina_agent.core.assessment import (
@@ -23,6 +24,7 @@ from sirina_agent.core.assessment import (
     render_assessment_report,
 )
 from sirina_agent.config import load_config
+from sirina_agent.tui.branding import ULYSSES_LOGO
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
@@ -38,21 +40,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
-
-
-ULYSSES_LOGO = r'''
-╔════════════════════╗
-║    U L Y S S E S   ║
-║   CYBER SENTINEL   ║
-║       .-^^-.       ║
-║    .-/  /\  \-.    ║
-║   / /  /==\  \ \   ║
-║  | |  | () |  | |  ║
-║   \ \  \==/  / /   ║
-║    `-\__\/__/-'    ║
-║     <_//||\\_>     ║
-╚════════════════════╝
-'''
 
 
 def create_tui(orchestrator, voice_io=None):
@@ -74,6 +61,7 @@ class RichTUI:
         self._last_response_wants_report = False
         self._assessment_project: AssessmentProject | None = None
         self._assessment_install_attempted = False
+        self._queued_input: str | None = None
 
     def run(self) -> None:
         boot_message = startup_brief(self.orchestrator, self.voice_io)
@@ -85,7 +73,12 @@ class RichTUI:
         )
         self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
         while True:
-            text = Prompt.ask("[bold cyan]you[/bold cyan]")
+            if self._queued_input is None:
+                text = Prompt.ask("[bold cyan]you[/bold cyan]")
+            else:
+                text = self._queued_input
+                self._queued_input = None
+                self.console.print(f"[bold cyan]you[/bold cyan] {text}")
             if not text:
                 continue
             if text.startswith("/"):
@@ -94,7 +87,7 @@ class RichTUI:
                 continue
             new_assessment = is_assessment_request(text)
             assessment_request = new_assessment or (self._assessment_project is not None and is_assessment_continuation(text))
-            wants_report = assessment_request or is_report_request(text)
+            wants_report = assessment_request or (is_report_request(text) and not is_skill_creation_request(text))
             self._last_user_text = text
             self._last_response_wants_report = wants_report
             if new_assessment:
@@ -227,9 +220,23 @@ class RichTUI:
         elif cmd == "/switch" and len(parts) > 1:
             self.orchestrator.session_id = parts[1]
         elif cmd == "/skills":
-            table = Table("name", "risk", "enabled", "permissions")
+            table = Table("name", "risk", "enabled", "permissions", "status")
             for manifest in self.orchestrator.skills.manifests():
-                table.add_row(manifest.name, manifest.risk_level, str(manifest.enabled), ", ".join(manifest.required_permissions))
+                table.add_row(
+                    manifest.name,
+                    manifest.risk_level,
+                    str(manifest.enabled),
+                    ", ".join(manifest.required_permissions),
+                    "ready",
+                )
+            for name, manifest, error in self.orchestrator.skills.load_failures():
+                table.add_row(
+                    name,
+                    manifest.risk_level if manifest else "unknown",
+                    str(manifest.enabled) if manifest else "unknown",
+                    ", ".join(manifest.required_permissions) if manifest else "",
+                    f"load_failed: {error}",
+                )
             self.console.print(table)
         elif cmd == "/memory":
             for item in self.orchestrator.memory.items[-20:]:
@@ -246,7 +253,15 @@ class RichTUI:
                 extra = {"sudo_password": Prompt.ask("sudo password", password=True)}
             tool_result = self.orchestrator.confirm_pending_tool(token, extra)
             self.console.print(Panel(tool_result, title="Tool result"))
-            if self._last_response_wants_report:
+            resume_skill = self.orchestrator.consume_skill_resume()
+            if resume_skill:
+                with self.console.status(f"[bold magenta]Using {resume_skill}...[/bold magenta]", spinner="dots"):
+                    answer = self.orchestrator.handle_text(
+                        f"Skill `{resume_skill}` is now active. Continue the prior request and use `{resume_skill}` now "
+                        f"when applicable. Do not recreate it.\n\nPrior request:\n{self._last_user_text}"
+                    )
+                self.console.print(Panel(answer, title="Ulysses"))
+            elif self._last_response_wants_report:
                 try:
                     with self.console.status("[bold magenta]Ulysses is writing report...[/bold magenta]", spinner="dots"):
                         answer = self.orchestrator.answer_from_tool_result(self._last_user_text, tool_result)
@@ -265,9 +280,9 @@ class RichTUI:
         elif cmd == "/create-skill" and len(parts) > 2:
             name = parts[1]
             request = " ".join(parts[2:])
-            self.console.print(
-                Panel(self.orchestrator._run_skill("create_skill", {"name": name, "request": request}), title="Skill proposal")
-            )
+            with self.console.status("[bold cyan]Researching and building skill...[/bold cyan]", spinner="dots"):
+                result = self.orchestrator._run_skill("create_skill", {"name": name, "request": request})
+            self.console.print(Panel(result, title="Skill proposal"))
         elif cmd in {"/autonomous", "/***autonomous"}:
             if len(parts) > 1 and parts[1].lower() in {"on", "off"}:
                 enabled = parts[1].lower() == "on"
@@ -289,14 +304,18 @@ class RichTUI:
         elif cmd == "/reload":
             try:
                 self.orchestrator.config = load_config(self.orchestrator.config_path)
-                self.orchestrator.sync_command_policy_from_config()
+                if not self.orchestrator.sync_command_policy_from_config(force=True):
+                    raise RuntimeError("command policy synchronization failed")
+                loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
                 self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
             except Exception as exc:
                 self.console.print(Panel(str(exc), title="Config reload failed"))
             else:
                 self.console.print(
                     f"Config reloaded from {self.orchestrator.config_path}; "
-                    f"nikto allowed: {'nikto' in self.orchestrator.config.skills.command.allowed_commands}"
+                    f"external skills: {', '.join(loaded) or 'none'}; "
+                    f"command allowlist synchronized: "
+                    f"{len(set(self.orchestrator.config.skills.command.allowed_commands))} commands"
                 )
         elif cmd == "/setup":
             self._setup_provider()
@@ -316,6 +335,22 @@ class RichTUI:
                 self.console.print("Voice responses: off")
             else:
                 self.console.print("Usage: /voice, /voice on, or /voice off")
+        elif cmd == "/talk":
+            if not self.voice_io:
+                self.console.print("Voice input is not active. Start without --text-only to use push to talk.")
+            else:
+                if self.voice_io.state.tts == "speaking":
+                    self.voice_io.interrupt()
+                try:
+                    with self.console.status("[bold cyan]Listening...[/bold cyan]", spinner="dots"):
+                        transcript = self.voice_io.listen_once().strip()
+                except Exception as exc:
+                    self.console.print(Panel(str(exc), title="Voice input failed"))
+                else:
+                    if transcript:
+                        self._queued_input = transcript
+                    else:
+                        self.console.print("No speech detected.")
         elif cmd == "/mute":
             if not self.voice_io:
                 self.console.print("Voice I/O is not active. Start without --text-only to enable Sirina voice mode.")
