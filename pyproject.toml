@@ -29,6 +29,7 @@ agent = [
     "sentence-transformers>=3.0.0",
     "textual>=0.70.0",
     "keyring>=25.0.0",
+  "mcp>=1.28,<2",
 ]
 wakeword = [
     "openwakeword>=0.6.0; python_version < '3.12'",

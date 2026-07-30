@@ -7,6 +7,7 @@ from .audio.sirina_io import SirinaSpeechIO
 from .config import load_config
 from .core.orchestrator import AgentOrchestrator
 from .llm.providers import build_provider
+from .mcp import MCPManager
 from .memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
 from .security.commands import CommandPolicy, CommandRunner
 from .sessions.store import SessionStore
@@ -23,7 +24,9 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
     configure_logging(config.logging.directory, config.logging.level, config.logging.max_bytes, config.logging.backups)
     sessions = SessionStore(config.memory.sqlite_path)
     embeddings = LocalHashEmbeddingProvider(config.memory.dimension)
-    memory = FaissMemoryStore(config.memory.faiss_path, config.memory.metadata_path, embeddings, config.memory.max_items)
+    memory = FaissMemoryStore(
+        config.memory.faiss_path, config.memory.metadata_path, embeddings, config.memory.max_items
+    )
     policy = CommandPolicy(
         config.skills.command.allowed_commands,
         config.skills.command.denied_commands,
@@ -34,7 +37,12 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         config.skills.command.bypass_confirmation_for_allowed_commands,
         config.skills.command.godmode,
     )
-    runner = CommandRunner(policy, audit_logger(config.logging.directory), config.skills.command.timeout_seconds, config.skills.command.max_output_chars)
+    runner = CommandRunner(
+        policy,
+        audit_logger(config.logging.directory),
+        config.skills.command.timeout_seconds,
+        config.skills.command.max_output_chars,
+    )
     skills = default_registry(
         SystemCommandSkill(runner),
         config.skills.skills_dir,
@@ -47,9 +55,20 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         skills.register(DelegateSubagentSkill(subagents))
         skills.register(SubagentJobsSkill(subagents))
         skills.register(DeleteSubagentSkill(subagents))
-    orchestrator = AgentOrchestrator(config, sessions, memory, build_provider(config.llm), skills, config_path, subagents)
+    mcp = MCPManager(config.mcp, skills, audit_logger(config.logging.directory))
+    orchestrator = AgentOrchestrator(
+        config,
+        sessions,
+        memory,
+        build_provider(config.llm),
+        skills,
+        config_path,
+        subagents,
+        mcp,
+    )
     if subagents:
         subagents.provider_factory = lambda: build_provider(orchestrator.config.llm)
+    mcp.start()
     return orchestrator, SirinaSpeechIO(config)
 
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
 import importlib.util
+from pathlib import Path
+from threading import RLock
 
 import yaml
 
@@ -16,18 +17,28 @@ class SkillRegistry:
         self._skills: dict[str, Skill] = {}
         self._external_manifests: dict[str, SkillManifest] = {}
         self._load_errors: dict[str, str] = {}
+        self._lock = RLock()
 
     def register(self, skill: Skill) -> None:
-        self._skills[skill.manifest.name] = skill
+        with self._lock:
+            self._skills[skill.manifest.name] = skill
+
+    def unregister_prefix(self, prefix: str) -> None:
+        with self._lock:
+            for name in [name for name in self._skills if name.startswith(prefix)]:
+                self._skills.pop(name, None)
 
     def get(self, name: str) -> Skill:
-        return self._skills[name]
+        with self._lock:
+            return self._skills[name]
 
     def enabled(self) -> list[Skill]:
-        return [skill for skill in self._skills.values() if skill.manifest.enabled]
+        with self._lock:
+            return [skill for skill in self._skills.values() if skill.manifest.enabled]
 
     def manifests(self) -> list[SkillManifest]:
-        return [skill.manifest for skill in self._skills.values()]
+        with self._lock:
+            return [skill.manifest for skill in self._skills.values()]
 
     def load_failures(self) -> list[tuple[str, SkillManifest | None, str]]:
         return [

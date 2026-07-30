@@ -14,6 +14,11 @@ from sirina_agent.skills.registry import SkillRegistry
 from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp, _boot_progress, _set_system_clipboard_text
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 class PasteHarness(App):
     def __init__(self):
         super().__init__()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import replace
 from threading import Thread
@@ -44,6 +45,8 @@ from sirina_agent.core.assessment import (
 )
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
+from sirina_agent.mcp.client import SDKMCPClient
+from sirina_agent.mcp.setup import MCPServerSetup, apply_mcp_server_setup
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_LOGO
 
@@ -76,12 +79,7 @@ class RichTUI:
 
     def run(self) -> None:
         boot_message = startup_brief(self.orchestrator, self.voice_io)
-        self.console.print(
-            Panel(
-                f"{ULYSSES_LOGO}\n"
-                f"{boot_message}"
-            )
-        )
+        self.console.print(Panel(f"{ULYSSES_LOGO}\n{boot_message}"))
         self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
         self.connectors.start_all()
         while True:
@@ -98,7 +96,9 @@ class RichTUI:
                     break
                 continue
             new_assessment = is_assessment_request(text)
-            assessment_request = new_assessment or (self._assessment_project is not None and is_assessment_continuation(text))
+            assessment_request = new_assessment or (
+                self._assessment_project is not None and is_assessment_continuation(text)
+            )
             wants_report = assessment_request or (is_report_request(text) and not is_skill_creation_request(text))
             self._last_user_text = text
             self._last_response_wants_report = wants_report
@@ -156,6 +156,8 @@ class RichTUI:
             if should_speak:
                 self._speak(answer)
         self.connectors.stop_all()
+        if self.orchestrator.mcp:
+            self.orchestrator.mcp.stop()
 
     def _run_complete_assessment(self, target: str, preferred_command: str | None = None) -> str:
         assert self._assessment_project is not None
@@ -276,7 +278,9 @@ class RichTUI:
                 self.console.print(Panel(answer, title="Ulysses"))
             elif self._last_response_wants_report:
                 try:
-                    with self.console.status("[bold magenta]Ulysses is writing report...[/bold magenta]", spinner="dots"):
+                    with self.console.status(
+                        "[bold magenta]Ulysses is writing report...[/bold magenta]", spinner="dots"
+                    ):
                         answer = self.orchestrator.answer_from_tool_result(self._last_user_text, tool_result)
                     if self._assessment_project:
                         artifact = self.artifacts.save_project_markdown_report(self._assessment_project, answer)
@@ -289,7 +293,12 @@ class RichTUI:
                 except Exception as exc:
                     self.console.print(Panel(str(exc), title="Report failed"))
         elif cmd == "/run" and len(parts) > 1:
-            self.console.print(Panel(self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}), title="Tool proposal"))
+            self.console.print(
+                Panel(
+                    self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}),
+                    title="Tool proposal",
+                )
+            )
         elif cmd == "/create-skill" and len(parts) > 2:
             name = parts[1]
             request = " ".join(parts[2:])
@@ -320,6 +329,8 @@ class RichTUI:
                 if not self.orchestrator.sync_command_policy_from_config(force=True):
                     raise RuntimeError("command policy synchronization failed")
                 loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
+                if self.orchestrator.mcp:
+                    self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp)
                 self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
             except Exception as exc:
                 self.console.print(Panel(str(exc), title="Config reload failed"))
@@ -330,13 +341,34 @@ class RichTUI:
                     f"command allowlist synchronized: "
                     f"{len(set(self.orchestrator.config.skills.command.allowed_commands))} commands"
                 )
+        elif cmd == "/mcp":
+            action = parts[1].lower() if len(parts) > 1 else "servers"
+            if action in {"servers", "status"}:
+                self.console.print(self.orchestrator.mcp.status_detail())
+            elif action == "tools":
+                names = [
+                    manifest.name
+                    for manifest in self.orchestrator.skills.manifests()
+                    if manifest.name.startswith("mcp__")
+                ]
+                self.console.print("\n".join(names) or "No MCP tools are registered.")
+            elif action == "reconnect" and len(parts) > 2:
+                try:
+                    self.orchestrator.mcp.discover(parts[2])
+                    self.console.print(f"MCP reconnection started: {parts[2]}")
+                except KeyError as exc:
+                    self.console.print(str(exc))
+            else:
+                self.console.print("Usage: /mcp servers, /mcp tools, or /mcp reconnect <server>")
         elif cmd == "/setup":
             if len(parts) > 1 and parts[1].lower() in {"provider", "providers"}:
                 self._setup_provider()
             elif len(parts) > 1 and parts[1].lower() in {"connector", "connectors"}:
                 self._setup_connectors()
+            elif len(parts) > 1 and parts[1].lower() == "mcp":
+                self._setup_mcp()
             else:
-                self.console.print("Usage: /setup providers or /setup connectors")
+                self.console.print("Usage: /setup providers, /setup connectors, or /setup mcp")
         elif cmd == "/context":
             self.console.print_json(data=self.orchestrator.context_usage())
         elif cmd == "/voice":
@@ -383,7 +415,12 @@ class RichTUI:
             else:
                 self._speak(" ".join(parts[1:]))
         elif cmd == "/export":
-            self.console.print_json(data={"sessions": self.orchestrator.sessions.list_sessions(), "memory": [item.__dict__ for item in self.orchestrator.memory.items]})
+            self.console.print_json(
+                data={
+                    "sessions": self.orchestrator.sessions.list_sessions(),
+                    "memory": [item.__dict__ for item in self.orchestrator.memory.items],
+                }
+            )
         else:
             self.console.print("Unknown command.")
         return False
@@ -455,8 +492,109 @@ class RichTUI:
         else:
             self.console.print(f"Connector setup is not available: {connector_id}")
 
+    def _setup_mcp(self) -> None:
+        current = {server.id: server for server in self.orchestrator.config.mcp.servers}
+        choices = ["new", *current]
+        for index, server_id in enumerate(choices, 1):
+            self.console.print(f"{index}. {server_id}")
+        selected = choices[int(Prompt.ask("MCP server", choices=[str(i) for i in range(1, len(choices) + 1)])) - 1]
+        existing = current.get(selected)
+        server_id = existing.id if existing else Prompt.ask("server id")
+        enabled = Confirm.ask("enabled", default=existing.enabled if existing else True)
+        transport = Prompt.ask(
+            "transport",
+            choices=["stdio", "streamable_http"],
+            default=existing.transport if existing else "stdio",
+        )
+        command = Prompt.ask("command", default=existing.command if existing else "") if transport == "stdio" else ""
+        args_text = Prompt.ask(
+            "arguments as JSON array",
+            default=json.dumps(existing.args if existing else []),
+        )
+        try:
+            args = json.loads(args_text)
+            if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+                raise ValueError("arguments must be a JSON array of strings")
+        except ValueError as exc:
+            self.console.print(Panel(str(exc), title="MCP setup failed"))
+            return
+        url = Prompt.ask("MCP URL", default=existing.url if existing else "") if transport == "streamable_http" else ""
+        env_names = Prompt.ask(
+            "environment variable names, comma separated",
+            default=", ".join(existing.environment_variables) if existing else "",
+        )
+        token_env = Prompt.ask(
+            "bearer token environment variable",
+            default=existing.bearer_token_env if existing else "",
+        )
+        token = Prompt.ask("bearer token blank keeps existing", password=True, default="") if token_env else ""
+        tools = Prompt.ask(
+            "allowed tool names, comma separated",
+            default=", ".join(existing.tool_allowlist) if existing else "",
+        )
+        risk = Prompt.ask(
+            "risk",
+            choices=["high", "medium", "low"],
+            default=existing.risk_level if existing else "high",
+        )
+        confirmation = Confirm.ask(
+            "require confirmation for every tool call",
+            default=existing.require_confirmation if existing else True,
+        )
+        setup = MCPServerSetup(
+            server_id,
+            enabled,
+            transport,
+            command,
+            tuple(args),
+            url,
+            tuple(_csv(env_names)),
+            token_env,
+            token,
+            tuple(_csv(tools)),
+            risk,
+            confirmation,
+            existing.timeout_seconds if existing else 60,
+        )
+        server = setup.server_config()
+        previous_token = os.environ.get(token_env) if token_env else None
+        if token and token_env:
+            os.environ[token_env] = token
+        try:
+            with self.console.status("Validating MCP server...", spinner="dots"):
+                discovered = (
+                    SDKMCPClient(self.orchestrator.config.mcp.allowed_stdio_commands).discover(server)
+                    if enabled
+                    else []
+                )
+            apply_mcp_server_setup(self.orchestrator.config, self.orchestrator.config_path, setup)
+            load_env_file(env_path_for_config(self.orchestrator.config_path))
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp, start=False)
+            if enabled:
+                self.orchestrator.mcp.discover_now(server.id)
+        except Exception as exc:
+            if token_env:
+                if previous_token is None:
+                    os.environ.pop(token_env, None)
+                else:
+                    os.environ[token_env] = previous_token
+            self.console.print(Panel(str(exc), title="MCP validation failed; not saved"))
+            return
+        status = self.orchestrator.mcp.status(server.id)
+        self.console.print(
+            Panel(
+                f"Status: {status.state}\nAdvertised tools: "
+                f"{', '.join(str(tool.get('name') or '') for tool in discovered) or 'none'}\n"
+                f"Allowed tools registered: {status.tool_count}",
+                title=f"MCP {server.id}",
+            )
+        )
+
     def _setup_telegram(self) -> None:
-        if self.orchestrator.config.connectors.telegram.enabled and not Confirm.ask("Keep Telegram enabled?", default=True):
+        if self.orchestrator.config.connectors.telegram.enabled and not Confirm.ask(
+            "Keep Telegram enabled?", default=True
+        ):
             self.connectors.remove("telegram")
             apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, TelegramSetup(False))
             self.orchestrator.config = load_config(self.orchestrator.config_path)
@@ -558,3 +696,7 @@ def _project_request(project: AssessmentProject) -> str:
         return (project.artifacts_dir / "request.txt").read_text(encoding="utf-8").strip()
     except Exception:
         return "current assessment"
+
+
+def _csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]

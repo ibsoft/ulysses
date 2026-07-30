@@ -17,7 +17,17 @@ MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
 
 
 class AgentOrchestrator:
-    def __init__(self, config, sessions, memory, llm, skills, config_path: str | Path | None = None, subagents=None) -> None:
+    def __init__(
+        self,
+        config,
+        sessions,
+        memory,
+        llm,
+        skills,
+        config_path: str | Path | None = None,
+        subagents=None,
+        mcp=None,
+    ) -> None:
         self.config = config
         self.config_path = Path(config_path).expanduser() if config_path else Path("config/ulysses.yaml")
         self.sessions = sessions
@@ -25,6 +35,7 @@ class AgentOrchestrator:
         self.llm = llm
         self.skills = skills
         self.subagents = subagents
+        self.mcp = mcp
         self.pending_tool: dict | None = None
         self.active_skill: str | None = None
         self.skill_resume_name: str | None = None
