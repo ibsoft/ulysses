@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 import httpx
+
+from .openai_auth import find_codex_cli
 
 
 class LLMProvider(Protocol):
@@ -63,6 +70,102 @@ class MockProvider:
         return {"choices": [{"message": {"role": "assistant", "content": f"Ulysses heard: {last}"}}]}
 
 
+class CodexProvider:
+    def __init__(self, model: str, timeout_seconds: float = 60.0) -> None:
+        if not model.strip():
+            raise LLMProviderError("Codex provider requires a model returned by model/list.")
+        self.model = model.strip()
+        self.timeout_seconds = timeout_seconds
+
+    def complete(self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        codex = find_codex_cli()
+        if not codex:
+            raise LLMProviderError("Codex provider requires the Codex CLI.")
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["content", "tool_calls"],
+            "properties": {
+                "content": {"type": ["string", "null"]},
+                "tool_calls": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["name", "arguments"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "arguments": {"type": "string", "description": "JSON object encoded as a string"},
+                        },
+                    },
+                },
+            },
+        }
+        prompt = (
+            "Act only as the reasoning backend for Ulysses. Do not execute shell commands or use built-in tools. "
+            "Use the supplied conversation to answer. When a listed Ulysses tool is needed, return it in tool_calls "
+            "instead of claiming it was executed. Return no tool names that are not listed.\n\n"
+            f"Conversation JSON:\n{json.dumps(messages, ensure_ascii=False)}\n\n"
+            f"Available Ulysses tools JSON:\n{json.dumps(tools or [], ensure_ascii=False)}"
+        )
+        with tempfile.TemporaryDirectory(prefix="ulysses-codex-") as directory:
+            root = Path(directory)
+            schema_path = root / "response-schema.json"
+            output_path = root / "response.json"
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+            try:
+                result = subprocess.run(
+                    [
+                        codex,
+                        "exec",
+                        "--ephemeral",
+                        "--ignore-user-config",
+                        "--model",
+                        self.model,
+                        "--sandbox",
+                        "read-only",
+                        "--skip-git-repo-check",
+                        "--output-schema",
+                        str(schema_path),
+                        "--output-last-message",
+                        str(output_path),
+                        "-",
+                    ],
+                    input=prompt,
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise LLMProviderError("Codex request could not be completed.") from exc
+            if result.returncode != 0 or not output_path.exists():
+                raise LLMProviderError("Codex request failed.")
+            try:
+                payload = json.loads(output_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise LLMProviderError("Codex returned an invalid response.") from exc
+        message: dict[str, Any] = {"role": "assistant", "content": payload.get("content")}
+        calls = []
+        for call in payload.get("tool_calls") or []:
+            if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+                continue
+            calls.append(
+                {
+                    "id": f"call_{uuid4().hex}",
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": call.get("arguments") if isinstance(call.get("arguments"), str) else "{}",
+                    },
+                }
+            )
+        if calls:
+            message["tool_calls"] = calls
+        return {"choices": [{"message": message}]}
+
+
 def build_provider(config) -> LLMProvider:
     if config.provider == "mock":
         return MockProvider()
@@ -71,14 +174,9 @@ def build_provider(config) -> LLMProvider:
         if not api_key:
             raise RuntimeError(f"{config.api_key_env} is required for {config.provider} provider")
         return OpenAICompatibleProvider(config.base_url, config.model, api_key, config.timeout_seconds)
+    if config.provider == "openai_chatgpt":
+        return CodexProvider(config.model, config.timeout_seconds)
     if config.provider == "ollama":
         api_key = os.getenv(config.api_key_env) or "ollama"
         return OpenAICompatibleProvider(config.base_url, config.model, api_key, config.timeout_seconds)
-    token = os.getenv(config.oauth_token_env or "")
-    if not token and config.oauth_keyring_service and config.oauth_keyring_username:
-        import keyring  # type: ignore
-
-        token = keyring.get_password(config.oauth_keyring_service, config.oauth_keyring_username)
-    if not token:
-        raise RuntimeError("OAuth-compatible provider requires a configured token env var or keyring entry")
-    return OpenAICompatibleProvider(config.base_url, config.model, token, config.timeout_seconds)
+    raise RuntimeError(f"Unsupported provider: {config.provider}")

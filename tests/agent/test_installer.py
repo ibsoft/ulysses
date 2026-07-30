@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 INSTALLER = Path(__file__).parents[2] / "scripts" / "install-ulysses-linux"
 
 
@@ -51,3 +50,10 @@ def test_installer_animates_each_phase_and_preserves_failure_output():
     assert 'kill -0 "${pid}"' in script
     assert 'sed \'s/^/    /\' "${log_file}" >&2' in script
     assert "ULYSSES DEPLOYMENT COMPLETE" in script
+
+
+def test_installer_discovers_and_persists_codex_executable():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'CODEX_BIN_DISCOVERED="$(command -v codex 2>/dev/null || true)"' in script
+    assert 'ULYSSES_CODEX_BIN=${CODEX_BIN_DISCOVERED}' in script

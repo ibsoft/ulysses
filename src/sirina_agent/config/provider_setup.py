@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import yaml
 
 from .models import UlyssesConfig
-
 
 PROVIDER_DEFAULTS = {
     "openai": {
@@ -29,11 +27,11 @@ PROVIDER_DEFAULTS = {
         "model": "llama3.1",
         "api_key_env": "OLLAMA_API_KEY",
     },
-    "oauth_compatible": {
-        "provider": "oauth_compatible",
-        "base_url": "https://provider.example/v1",
-        "model": "model-name",
-        "oauth_token_env": "ULYSSES_PROVIDER_TOKEN",
+    "openai_chatgpt": {
+        "provider": "openai_chatgpt",
+        "base_url": "",
+        "model": "",
+        "api_key_env": "",
     },
 }
 
@@ -45,8 +43,6 @@ class ProviderSetup:
     base_url: str
     api_key_env: str = ""
     api_key: str = ""
-    oauth_token_env: str = ""
-    oauth_token: str = ""
 
 
 def config_path_for_runtime(config_path: str | Path | None) -> Path:
@@ -64,10 +60,11 @@ def apply_provider_setup(config: UlyssesConfig, config_path: Path, setup: Provid
     llm["provider"] = provider
     llm["model"] = setup.model.strip()
     llm["base_url"] = setup.base_url.strip().rstrip("/")
-    llm["api_key_env"] = (setup.api_key_env or default_for(provider, "api_key_env") or "OPENAI_API_KEY").strip()
-    llm["oauth_token_env"] = (setup.oauth_token_env or default_for(provider, "oauth_token_env") or "").strip() or None
-    llm["oauth_keyring_service"] = None
-    llm["oauth_keyring_username"] = None
+    llm["api_key_env"] = (
+        ""
+        if provider == "openai_chatgpt"
+        else (setup.api_key_env or default_for(provider, "api_key_env") or "OPENAI_API_KEY").strip()
+    )
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -75,8 +72,6 @@ def apply_provider_setup(config: UlyssesConfig, config_path: Path, setup: Provid
     env_updates: dict[str, str] = {}
     if setup.api_key:
         env_updates[llm["api_key_env"]] = setup.api_key
-    if setup.oauth_token and llm["oauth_token_env"]:
-        env_updates[llm["oauth_token_env"]] = setup.oauth_token
     if provider == "ollama":
         env_updates.setdefault(llm["api_key_env"], "ollama")
     if env_updates:
@@ -125,14 +120,13 @@ def setup_from_provider(provider: str) -> ProviderSetup:
         model=str(defaults["model"]),
         base_url=str(defaults["base_url"]),
         api_key_env=str(defaults.get("api_key_env") or ""),
-        oauth_token_env=str(defaults.get("oauth_token_env") or ""),
     )
 
 
 def provider_labels() -> list[tuple[str, str]]:
     return [
-        ("openai", "OpenAI"),
+        ("openai", "OpenAI API key"),
+        ("openai_chatgpt", "OpenAI browser"),
         ("kimi", "Kimi"),
         ("ollama", "Ollama"),
-        ("oauth_compatible", "OAuth"),
     ]

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
+from dataclasses import replace
 from datetime import datetime
 from itertools import cycle
 from threading import Thread
@@ -50,6 +52,7 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
+from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_LOGO
@@ -157,25 +160,45 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
             yield Label("Provider setup")
-            yield Static("Choose a provider, edit fields, then save. Secret fields are write-only.")
+            yield Static("OpenAI browser login opens your browser and stores no OAuth token in Ulysses.")
             with Horizontal(id="setup-provider-buttons"):
                 for provider, label in provider_labels():
                     yield Button(label, id=f"setup-provider-{provider}")
-            yield Label("Model")
-            yield Input(value=self.config.llm.model, id="setup-model", classes="setup-input")
-            yield Label("Base URL")
-            yield Input(value=self.config.llm.base_url, id="setup-base-url", classes="setup-input")
-            yield Label("API key environment variable")
-            yield Input(value=self.config.llm.api_key_env, id="setup-api-env", classes="setup-input")
-            yield Label("API key")
-            yield Input(password=True, placeholder="leave blank to keep existing key", id="setup-api-key", classes="setup-input")
-            yield Label("OAuth token environment variable")
-            yield Input(value=self.config.llm.oauth_token_env or "", id="setup-oauth-env", classes="setup-input")
-            yield Label("OAuth token")
-            yield Input(password=True, placeholder="leave blank to keep existing token", id="setup-oauth-token", classes="setup-input")
+            yield Label("Model", id="setup-model-label")
+            yield Input(
+                value=self.config.llm.model,
+                id="setup-model",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("Base URL", id="setup-base-url-label")
+            yield Input(
+                value=self.config.llm.base_url,
+                id="setup-base-url",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("API key environment variable", id="setup-api-env-label")
+            yield Input(
+                value=self.config.llm.api_key_env,
+                id="setup-api-env",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("API key", id="setup-api-key-label")
+            yield Input(
+                password=True,
+                placeholder="leave blank to keep existing key",
+                id="setup-api-key",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
             with Horizontal(id="setup-actions"):
                 yield Button("Save", variant="primary", id="setup-save")
                 yield Button("Cancel", id="setup-cancel")
+
+    def on_mount(self) -> None:
+        self._toggle_provider_fields()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -187,8 +210,6 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
                     base_url=self.query_one("#setup-base-url", Input).value,
                     api_key_env=self.query_one("#setup-api-env", Input).value,
                     api_key=self.query_one("#setup-api-key", Input).value,
-                    oauth_token_env=self.query_one("#setup-oauth-env", Input).value,
-                    oauth_token=self.query_one("#setup-oauth-token", Input).value,
                 )
             )
             return
@@ -204,7 +225,79 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
         self.query_one("#setup-model", Input).value = default_for(provider, "model")
         self.query_one("#setup-base-url", Input).value = default_for(provider, "base_url")
         self.query_one("#setup-api-env", Input).value = default_for(provider, "api_key_env")
-        self.query_one("#setup-oauth-env", Input).value = default_for(provider, "oauth_token_env")
+        disabled = provider == "openai_chatgpt"
+        for selector in ("#setup-model", "#setup-base-url", "#setup-api-env", "#setup-api-key"):
+            self.query_one(selector, Input).disabled = disabled
+        self._toggle_provider_fields()
+
+    def _toggle_provider_fields(self) -> None:
+        visible = self.provider != "openai_chatgpt"
+        for selector in (
+            "#setup-model-label",
+            "#setup-model",
+            "#setup-base-url-label",
+            "#setup-base-url",
+            "#setup-api-env-label",
+            "#setup-api-env",
+            "#setup-api-key-label",
+            "#setup-api-key",
+        ):
+            self.query_one(selector).display = visible
+
+
+class OpenAICallbackScreen(ModalScreen[str | None]):
+    CSS = """
+    OpenAICallbackScreen { align: center middle; }
+    #openai-callback-dialog {
+        width: 100;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    #openai-login-actions, #openai-callback-actions { height: 3; margin-top: 1; }
+    """
+
+    def __init__(self, auth_url: str) -> None:
+        super().__init__()
+        self.auth_url = auth_url
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="openai-callback-dialog"):
+            yield Label("OpenAI browser login")
+            yield Static("Copy the login link, open it in your browser, and sign in to OpenAI.")
+            yield Input(value=self.auth_url, select_on_focus=True, id="openai-login-url")
+            with Horizontal(id="openai-login-actions"):
+                yield Button("Copy login link", variant="primary", id="openai-login-copy")
+            yield Static("Then paste the complete localhost return URL below. It is masked and not saved.")
+            yield Input(password=True, placeholder="http://localhost:.../auth/callback?...", id="openai-callback")
+            with Horizontal(id="openai-callback-actions"):
+                yield Button("Continue", variant="primary", id="openai-callback-submit")
+                yield Button("Cancel", id="openai-callback-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#openai-callback", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "openai-login-copy":
+            try:
+                self.app.copy_to_clipboard(self.auth_url)
+            except Exception as exc:
+                self.notify(f"Clipboard unavailable: {exc}", severity="error")
+                return
+            if _set_system_clipboard_text(self.auth_url):
+                self.notify("OpenAI login link copied.")
+            else:
+                login_input = self.query_one("#openai-login-url", Input)
+                login_input.focus()
+                self.notify("System clipboard unavailable. The login link is selected.", severity="warning")
+        elif event.button.id == "openai-callback-submit":
+            self.dismiss(self.query_one("#openai-callback", Input).value)
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
 
 
 class TelegramSetupScreen(ModalScreen[TelegramSetup | None]):
@@ -1165,11 +1258,59 @@ class UlyssesTextualApp(App):
 
     def on_unmount(self) -> None:
         self.connectors.stop_all()
+        _stop_system_clipboard_owner()
 
     def _finish_provider_setup(self, setup: ProviderSetup | None) -> None:
         if setup is None:
             self._write_system("Provider setup cancelled.")
             return
+        if setup.provider == "openai_chatgpt":
+            self._start_waiting()
+            Thread(target=self._start_openai_login, args=(setup,), daemon=True).start()
+            return
+        self._activate_provider_setup(setup)
+
+    def _start_openai_login(self, setup: ProviderSetup) -> None:
+        login = OpenAIBrowserLogin()
+        try:
+            login.start()
+        except OpenAIBrowserLoginError as exc:
+            self.call_from_thread(self._provider_setup_error, str(exc))
+            return
+        self.call_from_thread(self._show_openai_callback, login, setup)
+
+    def _show_openai_callback(self, login: OpenAIBrowserLogin, setup: ProviderSetup) -> None:
+        self._stop_waiting()
+        self.push_screen(OpenAICallbackScreen(login.auth_url), lambda value: self._finish_openai_callback(value, login, setup))
+
+    def _finish_openai_callback(
+        self, callback_url: str | None, login: OpenAIBrowserLogin, setup: ProviderSetup
+    ) -> None:
+        if not callback_url:
+            login.close()
+            self._write_system("OpenAI browser login cancelled.")
+            return
+        self._start_waiting()
+        Thread(target=self._complete_openai_login, args=(callback_url, login, setup), daemon=True).start()
+
+    def _complete_openai_login(
+        self, callback_url: str, login: OpenAIBrowserLogin, setup: ProviderSetup
+    ) -> None:
+        try:
+            model = login.complete(callback_url)
+        except OpenAIBrowserLoginError as exc:
+            self.call_from_thread(self._provider_setup_error, str(exc))
+            return
+        resolved = replace(setup, model=model, base_url="", api_key_env="", api_key="")
+        self.call_from_thread(self._activate_provider_setup, resolved)
+
+    def _provider_setup_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Provider setup failed: {error}")
+        self._refresh_status()
+
+    def _activate_provider_setup(self, setup: ProviderSetup) -> None:
+        self._stop_waiting()
         config_path = self.orchestrator.config_path
         try:
             apply_provider_setup(self.orchestrator.config, config_path, setup)
@@ -1319,9 +1460,13 @@ class UlyssesTextualApp(App):
     def _copy_text(self, text: str, success_message: str) -> None:
         try:
             self.copy_to_clipboard(text)
-            self._write_system(success_message)
         except Exception as exc:
             self._write_error(f"Clipboard unavailable: {exc}")
+            return
+        if _set_system_clipboard_text(text):
+            self._write_system(success_message)
+        else:
+            self._write_error("System clipboard backend is unavailable.")
 
     def _selected_text(self) -> str:
         try:
@@ -1560,6 +1705,76 @@ def _system_clipboard_text() -> str:
         if result.returncode == 0 and result.stdout:
             return result.stdout.rstrip("\r\n")
     return ""
+
+
+_clipboard_owner_process: subprocess.Popen[str] | None = None
+
+
+def _set_system_clipboard_text(text: str) -> bool:
+    global _clipboard_owner_process
+    commands = [
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["powershell.exe", "-NoProfile", "-Command", "Set-Clipboard"],
+    ]
+    for command in commands:
+        executable = shutil.which(command[0])
+        if executable is None:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *command[1:]],
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            return True
+
+    python = shutil.which("python3")
+    if python is None or not os.environ.get("DISPLAY"):
+        return False
+    owner = (
+        "import sys; from PyQt5.QtCore import QTimer; from PyQt5.QtWidgets import QApplication; "
+        "app=QApplication([]); clipboard=app.clipboard(); clipboard.setText(sys.stdin.read()); "
+        "timer=QTimer(); timer.timeout.connect(lambda: app.quit() if not clipboard.ownsClipboard() else None); "
+        "timer.start(1000); app.exec()"
+    )
+    if _clipboard_owner_process and _clipboard_owner_process.poll() is None:
+        _clipboard_owner_process.terminate()
+    try:
+        process = subprocess.Popen(
+            [python, "-c", owner],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        if process.stdin is None:
+            process.terminate()
+            return False
+        process.stdin.write(text)
+        process.stdin.close()
+    except OSError:
+        return False
+    time.sleep(0.2)
+    if process.poll() is not None:
+        return False
+    _clipboard_owner_process = process
+    return True
+
+
+def _stop_system_clipboard_owner() -> None:
+    global _clipboard_owner_process
+    process, _clipboard_owner_process = _clipboard_owner_process, None
+    if process and process.poll() is None:
+        process.terminate()
 
 
 def _set_terminal_mouse_capture(app, enabled: bool) -> None:

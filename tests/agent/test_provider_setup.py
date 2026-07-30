@@ -9,7 +9,7 @@ from sirina_agent.config.provider_setup import (
     load_env_file,
     setup_from_provider,
 )
-from sirina_agent.llm.providers import OpenAICompatibleProvider, build_provider
+from sirina_agent.llm.providers import CodexProvider, OpenAICompatibleProvider, build_provider
 
 
 def test_kimi_provider_setup_writes_yaml_and_env(tmp_path):
@@ -55,8 +55,32 @@ def test_ollama_provider_uses_openai_compatible_local_endpoint(monkeypatch):
     assert provider.api_key == "ollama"
 
 
-def test_provider_defaults_include_openai_kimi_ollama_and_oauth():
+def test_provider_defaults_include_openai_browser_kimi_and_ollama():
     assert setup_from_provider("openai").api_key_env == "OPENAI_API_KEY"
+    assert setup_from_provider("openai_chatgpt").base_url == ""
+    assert setup_from_provider("openai_chatgpt").model == ""
     assert setup_from_provider("kimi").api_key_env == "KIMI_API_KEY"
     assert setup_from_provider("ollama").base_url == "http://localhost:11434/v1"
-    assert setup_from_provider("oauth_compatible").oauth_token_env == "ULYSSES_PROVIDER_TOKEN"
+
+
+def test_openai_browser_setup_does_not_write_a_secret(tmp_path):
+    config_path = tmp_path / "ulysses.yaml"
+    config = UlyssesConfig()
+
+    setup = setup_from_provider("openai_chatgpt")
+    setup = ProviderSetup(setup.provider, "gpt-5.3-codex", setup.base_url)
+    apply_provider_setup(config, config_path, setup)
+
+    loaded = load_config(config_path)
+    assert loaded.llm.provider == "openai_chatgpt"
+    assert loaded.llm.model == "gpt-5.3-codex"
+    assert loaded.llm.base_url == ""
+    assert loaded.llm.api_key_env == ""
+    assert not env_path_for_config(config_path).exists()
+
+
+def test_openai_browser_provider_uses_codex_backend():
+    provider = build_provider(LLMConfig(provider="openai_chatgpt", model="gpt-5.3-codex"))
+
+    assert isinstance(provider, CodexProvider)
+    assert provider.model == "gpt-5.3-codex"

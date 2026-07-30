@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from threading import Thread
 
 from rich.console import Console
@@ -41,6 +42,7 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
+from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_LOGO
@@ -392,18 +394,36 @@ class RichTUI:
             self.console.print(f"{index}. {label} ({provider})")
         choice = Prompt.ask("provider", choices=list(labels), default="1")
         provider = labels[choice]
-        model = Prompt.ask("model", default=default_for(provider, "model"))
-        base_url = Prompt.ask("base URL", default=default_for(provider, "base_url"))
-        api_key_env = Prompt.ask("API key env", default=default_for(provider, "api_key_env") or self.orchestrator.config.llm.api_key_env)
+        if provider == "openai_chatgpt":
+            model = ""
+            base_url = ""
+            api_key_env = ""
+        else:
+            model = Prompt.ask("model", default=default_for(provider, "model"))
+            base_url = Prompt.ask("base URL", default=default_for(provider, "base_url"))
+            api_key_env = Prompt.ask(
+                "API key env",
+                default=default_for(provider, "api_key_env") or self.orchestrator.config.llm.api_key_env,
+            )
         api_key = ""
-        oauth_token_env = default_for(provider, "oauth_token_env")
-        oauth_token = ""
-        if provider == "oauth_compatible":
-            oauth_token_env = Prompt.ask("OAuth token env", default=oauth_token_env)
-            oauth_token = Prompt.ask("OAuth token blank keeps existing", password=True, default="")
-        elif provider != "ollama":
+        if provider not in {"ollama", "openai_chatgpt"}:
             api_key = Prompt.ask("API key blank keeps existing", password=True, default="")
-        setup = ProviderSetup(provider, model, base_url, api_key_env, api_key, oauth_token_env, oauth_token)
+        setup = ProviderSetup(provider, model, base_url, api_key_env, api_key)
+        if provider == "openai_chatgpt":
+            login = OpenAIBrowserLogin()
+            try:
+                with self.console.status("Preparing OpenAI browser login...", spinner="dots"):
+                    login.start()
+                self.console.print("Open this login link in your browser:")
+                self.console.print(login.auth_url, markup=False, soft_wrap=True)
+                callback_url = Prompt.ask("Paste the localhost return URL", password=True)
+                with self.console.status("Completing OpenAI browser login...", spinner="dots"):
+                    model = login.complete(callback_url)
+                setup = replace(setup, model=model, base_url="", api_key_env="", api_key="")
+            except OpenAIBrowserLoginError as exc:
+                login.close()
+                self.console.print(Panel(str(exc), title="Provider setup failed"))
+                return
         try:
             config_path = self.orchestrator.config_path
             apply_provider_setup(self.orchestrator.config, config_path, setup)

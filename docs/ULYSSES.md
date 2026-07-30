@@ -10,7 +10,7 @@ src/sirina_agent/
   config/                  YAML plus ULYSSES__... environment overrides
   core/                    orchestration and memory injection
   audio/                   Sirina STT/TTS and wake-word adapters
-  llm/                     OpenAI-compatible and OAuth-compatible providers
+  llm/                     OpenAI-compatible providers and OpenAI browser authentication
   memory/                  FAISS-backed semantic memory with metadata
   sessions/                SQLite conversation persistence
   security/                command policy, confirmation and audit execution
@@ -138,7 +138,61 @@ python -m pip install -e ".[wakeword]"
 
 Without that extra, Ulysses still runs text-only and Sirina VAD/push-to-talk style voice flows.
 
-Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI, Kimi / Moonshot, local Ollama, and OAuth-compatible OpenAI-style providers. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key. Ulysses does not scrape browser tokens or bypass authentication controls.
+Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI API keys, OpenAI browser login through Codex, Kimi / Moonshot, and local Ollama. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key.
+
+## Providers
+
+Run `/setup providers` or press `F7` to open provider setup. The Textual dialog masks secret fields; the Rich fallback uses
+password-style terminal prompts. Setup writes non-secret provider settings to YAML, writes submitted secrets to the adjacent
+`env` file with mode `0600`, reloads that environment file, rebuilds the provider, and activates it immediately. Leaving a
+secret field blank preserves its existing value.
+
+Provider modes:
+
+- `openai`: OpenAI-compatible HTTPS endpoint using the environment variable named by `api_key_env`.
+- `openai_chatgpt`: OpenAI-only browser login managed by the Codex CLI.
+- `kimi`: Moonshot's OpenAI-compatible endpoint, defaulting to `KIMI_API_KEY`.
+- `ollama`: local OpenAI-compatible endpoint; defaults to the placeholder key `ollama` when no key is configured.
+- `mock`: local development response provider, configured through YAML or environment override rather than the setup dialog.
+
+### OpenAI Browser Mode
+
+OpenAI browser login uses the Codex app-server's managed ChatGPT authentication protocol. The Codex CLI must be installed
+and available on `PATH`. Select **OpenAI browser** from `/setup providers`; Ulysses displays the authorization URL in a
+selectable field with a **Copy login link** button. Open that link manually, sign in, then paste only the complete localhost
+return URL into the masked callback field.
+
+Ulysses accepts only the expected `http://localhost:<port>/auth/callback` origin returned for that login and requires both
+the OAuth `code` and `state`. It sends the URL to the local callback listener without following redirects. The URL is never
+added to chat, logs, YAML, or the Ulysses env file. Codex stores and refreshes its own OAuth credentials. Ulysses does not
+extract an API key or send these credentials to the Chat Completions API.
+
+After authentication, provider setup queries authenticated `model/list`, selects the current default visible model, and
+stores its exact provider-returned `model` value. Codex service routing remains internal because its protocol does not
+advertise a configurable base URL. The browser-provider form therefore hides model, URL, and API-key fields before login;
+it saves the discovered model and leaves `base_url` empty rather than inventing a value. Completions run through ephemeral
+Codex CLI sessions in an isolated temporary directory with a read-only sandbox and explicitly pass the discovered model ID.
+Codex returns either response text or structured Ulysses tool requests; Ulysses remains responsible for executing those
+tools under its command policy.
+
+The resulting non-secret YAML configuration is:
+
+```yaml
+llm:
+  provider: openai_chatgpt
+  model: <value returned by model/list>
+  base_url: ""
+  timeout_seconds: 60
+```
+
+The installer discovers the Codex executable with `command -v` and records that result as `ULYSSES_CODEX_BIN` in the
+protected environment file. Runtime resolution uses that value or the current `PATH`; Ulysses contains no editor- or
+platform-specific Codex installation paths.
+
+This flow is intentionally OpenAI-only. Ulysses does not accept pasted OAuth bearer tokens or implement generic provider
+OAuth. OpenAI documents Sign in with ChatGPT as a Codex-managed login that links the ChatGPT identity to an API account and
+creates an API key automatically. See [Codex CLI and Sign in with ChatGPT](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
+and the [Codex app-server authentication protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
 Run text-only:
 
@@ -218,6 +272,10 @@ Remote messaging is managed through a connector protocol rather than directly by
 stops, replaces, and reports status for all configured connectors. Each adapter registers a `ConnectorDefinition` and a
 factory with `register_connector`. Incoming requests include the connector ID, remote user ID, and message text, allowing
 multiple connector types to operate concurrently without connector-specific orchestration code.
+
+`/setup connectors` opens the registered connector selector. Each connector owns its credentials, verification process,
+transport, and authorization state, while `ConnectorManager` provides shared startup, replacement, shutdown, automatic
+status aggregation, and source-aware routing. Connector status appears in the Textual sidebar and `/status` output.
 
 Current connector:
 

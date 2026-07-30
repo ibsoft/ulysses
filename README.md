@@ -88,15 +88,56 @@ Set your API key in `~/.config/ulysses/env`:
 OPENAI_API_KEY=your_api_key_here
 ```
 
-## Telegram Connector
+## Provider Setup
 
-Create a bot with Telegram BotFather, then open Ulysses and run:
+Open provider configuration with `F7` or:
+
+```text
+/setup providers
+```
+
+Select OpenAI API key, OpenAI browser, Kimi, or Ollama. Secret fields are masked and write-only. Submitted API keys are
+saved to `~/.config/ulysses/env` with mode `0600`; YAML stores only the environment-variable name. Leaving a secret blank
+keeps its current value. The selected provider is rebuilt and activated without restarting Ulysses.
+
+### OpenAI Browser Login
+
+Browser login is supported for OpenAI only and requires the Codex CLI. Select **OpenAI browser**, then save:
+
+1. Ulysses starts the Codex app-server login protocol and displays the authorization link.
+2. Copy the link, open it in your browser, and sign in to OpenAI.
+3. Copy the complete `http://localhost:.../auth/callback?...` return URL from the browser and paste it into the masked
+   Ulysses callback field.
+4. Ulysses validates the exact loopback host, port, and callback path, forwards the URL only to the local Codex listener,
+   and activates the OpenAI provider after Codex confirms success.
+
+The return URL contains a short-lived authorization code. Ulysses never prints, logs, or saves it. Codex manages OAuth
+tokens and refresh. After successful login, Ulysses queries authenticated `model/list`, stores the provider's current
+default visible model ID, and sends inference requests through ephemeral, read-only Codex CLI sessions using that exact
+model. Service routing remains owned by Codex because the authentication and model-catalog protocol does not return a
+user-configurable base URL; Ulysses stores no guessed or synthetic URL. Generic OAuth providers and pasted bearer tokens
+are not supported for this login mode. See OpenAI's
+[Codex sign-in documentation](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt).
+
+The installer resolves Codex with `command -v` and records the discovered executable in the protected Ulysses environment
+file. At runtime Ulysses uses that discovered value or resolves `codex` from the current `PATH`; no installation path is
+embedded in the application.
+
+## Connectors
+
+Open connector configuration with:
 
 ```text
 /setup connectors
 ```
 
-Enter the bot token in the masked setup field. Ulysses validates the token and displays a temporary pairing command such
+The connector selector is backed by a generic registry and lifecycle manager so multiple connector adapters can operate
+concurrently. Telegram is the first available connector.
+
+### Telegram
+
+Create a bot with Telegram BotFather, select Telegram from `/setup connectors`, and enter the token in the masked setup
+field. Ulysses validates the token and displays a temporary pairing command such
 as `/verify 123456`. Send that command directly to the bot from the Telegram account you want to authorize. Unverified
 chats cannot invoke the agent. Pairing codes are single-use, expire after ten minutes, and are invalidated after five
 failed attempts.
@@ -193,12 +234,13 @@ ulysses --config config/ulysses.yaml
 
 Provider setup is available inside the TUI with `F7` or `/setup providers`. It can save and activate:
 
-- OpenAI: `https://api.openai.com/v1`, key env `OPENAI_API_KEY`
+- OpenAI API key: `https://api.openai.com/v1`, key env `OPENAI_API_KEY`
+- OpenAI browser: Codex-managed ChatGPT login; model is discovered from authenticated `model/list`
 - Kimi / Moonshot: `https://api.moonshot.ai/v1`, key env `KIMI_API_KEY`
 - Local Ollama: `http://localhost:11434/v1`, no real API key required
-- OAuth-compatible OpenAI-style providers: custom base URL and token env
 
-Use an OpenAI-compatible provider by setting `llm.provider`, `llm.base_url`, and token/key settings in `config/ulysses.yaml` or with `ULYSSES__...` environment overrides.
+Use an API-key provider by setting `llm.provider`, `llm.base_url`, and key settings in `config/ulysses.yaml` or with
+`ULYSSES__...` environment overrides. Interactive browser login must be started from `/setup providers`.
 
 ## Configuration
 
