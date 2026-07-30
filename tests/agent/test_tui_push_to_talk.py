@@ -1,8 +1,17 @@
+import time
+
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.events import Paste
 
-from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp, _set_system_clipboard_text
+from sirina_agent.config.models import UlyssesConfig
+from sirina_agent.core.orchestrator import AgentOrchestrator
+from sirina_agent.llm.providers import MockProvider
+from sirina_agent.memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
+from sirina_agent.sessions.store import SessionStore
+from sirina_agent.skills.registry import SkillRegistry
+from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp, _boot_progress, _set_system_clipboard_text
 
 
 class PasteHarness(App):
@@ -51,6 +60,53 @@ def test_system_clipboard_uses_discovered_native_writer(monkeypatch):
 
     assert _set_system_clipboard_text("login-url")
     assert calls == [(["/dynamic/clipboard", "-selection", "clipboard"], "login-url")]
+
+
+def test_boot_progress_resolves_checks_without_repeating_log_entries():
+    message = (
+        "Ulysses Cyber Sentinel initializing\n\n"
+        "Brain: up (provider / model)\nMemory: up (2 memories)\nSkills: up (one)\n"
+        "Prompt: up (profile)\nVoice: inactive"
+    )
+
+    first = _boot_progress(message, 0, "/")
+    middle = _boot_progress(message, 2, "-")
+    final = _boot_progress(message, 5, "|")
+
+    assert "Brain: / checking..." in first
+    assert "Memory: . waiting" in first
+    assert "Brain: up (provider / model)" in middle
+    assert "Skills: - checking..." in middle
+    assert "Voice: inactive" in final
+    assert "checking" not in final
+
+
+@pytest.mark.anyio
+async def test_sidebar_scrolls_without_hiding_lower_sections(tmp_path):
+    config = UlyssesConfig()
+    config.memory.sqlite_path = tmp_path / "sessions.sqlite3"
+    config.memory.faiss_path = tmp_path / "memory.faiss"
+    config.memory.metadata_path = tmp_path / "memory.jsonl"
+    sessions = SessionStore(config.memory.sqlite_path)
+    memory = FaissMemoryStore(
+        config.memory.faiss_path,
+        config.memory.metadata_path,
+        LocalHashEmbeddingProvider(64),
+    )
+    orchestrator = AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry())
+    app = UlyssesTextualApp(orchestrator)
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        sidebar = app.query_one("#sidebar", VerticalScroll)
+        assert not any("\nTheme: " in entry for entry in app.transcript_plain)
+        app._boot_started_at = time.monotonic() - 3
+        app._tick_boot_sequence()
+        assert not app.query_one("#boot-status").display
+        assert sum("Cyber Sentinel initializing" in entry for entry in app.transcript_plain) == 1
+        assert sidebar.max_scroll_y > 0
+        sidebar.scroll_end(animate=False)
+        await pilot.pause()
+        assert sidebar.scroll_y > 0
 
 
 def test_textual_tui_escape_stops_voice_with_priority():
