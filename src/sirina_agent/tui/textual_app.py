@@ -11,7 +11,7 @@ from threading import Thread
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Paste
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
@@ -55,7 +55,7 @@ from sirina_agent.core.assessment import (
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
-from sirina_agent.tui.branding import ULYSSES_LOGO
+from sirina_agent.tui.branding import ULYSSES_SIDEBAR_LOGO, ULYSSES_SPEAKING_LOGOS
 
 
 class TranscriptLog(RichLog):
@@ -393,22 +393,38 @@ class UlyssesTextualApp(App):
     #sidebar {
         width: 32;
         min-width: 28;
+        height: 100%;
         background: $panel;
         border: solid $primary;
         padding: 1 1;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-color: $accent;
+        scrollbar-background: $panel;
     }
 
     #logo {
-        width: 100%;
+        width: 24;
+        height: 10;
+        min-height: 10;
+        max-height: 10;
+        align-horizontal: center;
         content-align: center middle;
         text-align: center;
         color: $accent;
+        margin: 0 1;
     }
 
     #brand {
         width: 100%;
         content-align: center middle;
         text-align: center;
+        margin-bottom: 1;
+    }
+
+    #status {
+        width: 100%;
+        height: auto;
     }
 
     #main {
@@ -420,6 +436,18 @@ class UlyssesTextualApp(App):
         border: solid $accent;
         background: $boost;
         padding: 1 2;
+    }
+
+    #boot-status {
+        display: none;
+        width: 100%;
+        height: auto;
+        min-height: 10;
+        border: solid $primary;
+        background: $boost;
+        color: $text;
+        padding: 1 2;
+        margin-bottom: 1;
     }
 
     #composer {
@@ -493,6 +521,12 @@ class UlyssesTextualApp(App):
         self._spinner = cycle(self.SPINNER_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
+        self._boot_started_at = 0.0
+        self._boot_message = ""
+        self._boot_spoken_message = ""
+        self._boot_frame_index = 0
+        self._boot_timer = None
+        self._logo_frame_index = 0
         self.connectors = ConnectorManager.from_config(
             orchestrator.config,
             self._handle_connector_message,
@@ -504,8 +538,8 @@ class UlyssesTextualApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(id="shell"):
-            with Vertical(id="sidebar"):
-                yield Static(ULYSSES_LOGO, id="logo")
+            with VerticalScroll(id="sidebar"):
+                yield Static(ULYSSES_SIDEBAR_LOGO, id="logo")
                 yield Label(
                     f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version}",
                     id="brand",
@@ -555,25 +589,49 @@ class UlyssesTextualApp(App):
                     classes="muted",
                 )
             with Vertical(id="main"):
+                yield Static("", id="boot-status")
                 yield TranscriptLog(id="transcript", wrap=True, highlight=True, markup=True)
                 yield Static("", id="spinner", classes="muted")
                 yield ComposerInput(placeholder="Ask Ulysses, paste text, or type /command ...", id="composer")
         yield Footer()
 
     def on_mount(self) -> None:
-        self._apply_theme(self.theme_name)
+        self._apply_theme(self.theme_name, announce=False)
         talk_key = str(getattr(self.orchestrator.config.audio, "push_to_talk_key", "f4")).strip().lower()
         if talk_key and talk_key != "f4":
             self.bind(talk_key, "push_to_talk", description="Talk", show=True)
         boot_message = startup_brief(self.orchestrator, self.voice_io)
-        self._write_system(boot_message)
+        self._start_boot_sequence(boot_message, spoken_startup_brief(self.orchestrator, self.voice_io))
         self._refresh_status()
         self.connectors.start_all()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
-        self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
+
+    def _start_boot_sequence(self, message: str, spoken_message: str) -> None:
+        self._boot_started_at = time.monotonic()
+        self._boot_message = message
+        self._boot_spoken_message = spoken_message
+        self._boot_frame_index = 0
+        widget = self.query_one("#boot-status", Static)
+        widget.display = True
+        widget.update(_boot_progress(message, 0, self.SPINNER_FRAMES[0]))
+        self._boot_timer = self.set_interval(0.12, self._tick_boot_sequence)
+
+    def _tick_boot_sequence(self) -> None:
+        elapsed = time.monotonic() - self._boot_started_at
+        if elapsed >= 2.3:
+            if self._boot_timer is not None:
+                self._boot_timer.pause()
+            self.query_one("#boot-status", Static).display = False
+            self._write_system(self._boot_message)
+            self._speak(self._boot_spoken_message)
+            return
+        completed = min(5, int(elapsed / 0.36))
+        self._boot_frame_index = (self._boot_frame_index + 1) % len(self.SPINNER_FRAMES)
+        frame = self.SPINNER_FRAMES[self._boot_frame_index]
+        self.query_one("#boot-status", Static).update(_boot_progress(self._boot_message, completed, frame))
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -1495,7 +1553,7 @@ class UlyssesTextualApp(App):
         current = self.THEMES.index(self.theme_name) if self.theme_name in self.THEMES else 0
         self._apply_theme(self.THEMES[(current + 1) % len(self.THEMES)])
 
-    def _apply_theme(self, name: str) -> None:
+    def _apply_theme(self, name: str, announce: bool = True) -> None:
         requested = name
         theme = self.THEME_ALIASES.get(name)
         if theme is None:
@@ -1510,7 +1568,8 @@ class UlyssesTextualApp(App):
                 self._write_error(f"Theme `{requested}` failed, reverted to ulysses_dark: {exc}")
         self.theme_name = name
         if self.is_mounted:
-            self._write_system(f"Theme: {name}")
+            if announce:
+                self._write_system(f"Theme: {name}")
             self._refresh_status()
 
     def _refresh_status(self) -> None:
@@ -1583,6 +1642,9 @@ class UlyssesTextualApp(App):
             self._stop_speaking_ui()
             self._refresh_status()
             return
+        if self._speaking:
+            self._logo_frame_index = (self._logo_frame_index + 1) % len(ULYSSES_SPEAKING_LOGOS)
+            self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[self._logo_frame_index])
         if self._waiting or self._speaking or self._listening:
             self.query_one("#spinner", Static).update(f"{next(self._spinner)} {self._activity_label()}...")
 
@@ -1648,6 +1710,8 @@ class UlyssesTextualApp(App):
         speech_id = self._speech_id
         self.voice_io.interrupt()
         self._speaking = True
+        self._logo_frame_index = 0
+        self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[0])
         self._activity_text = "speaking"
         self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: speaking...")
         self._refresh_status()
@@ -1674,6 +1738,8 @@ class UlyssesTextualApp(App):
 
     def _stop_speaking_ui(self) -> None:
         self._speaking = False
+        self._logo_frame_index = 0
+        self.query_one("#logo", Static).update(ULYSSES_SIDEBAR_LOGO)
         if not self._waiting:
             self._activity_text = "idle"
             self.query_one("#spinner", Static).update("")
@@ -1681,6 +1747,26 @@ class UlyssesTextualApp(App):
 
 def _time() -> str:
     return datetime.now().strftime("%H:%M")
+
+
+def _boot_progress(message: str, completed: int, frame: str) -> str:
+    labels = ("Brain", "Memory", "Skills", "Prompt", "Voice")
+    final_lines = {
+        label: line
+        for line in message.splitlines()
+        for label in labels
+        if line.startswith(f"{label}:")
+    }
+    heading = message.splitlines()[0] if message else "Ulysses Cyber Sentinel initializing"
+    lines = [heading, "", "System readiness checks"]
+    for index, label in enumerate(labels):
+        if index < completed:
+            lines.append(final_lines.get(label, f"{label}: ready"))
+        elif index == completed:
+            lines.append(f"{label}: {frame} checking...")
+        else:
+            lines.append(f"{label}: . waiting")
+    return "\n".join(lines)
 
 
 def _gauge(percent: int, width: int = 14) -> str:
