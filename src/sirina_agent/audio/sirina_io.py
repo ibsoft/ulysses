@@ -6,7 +6,6 @@ import sys
 import threading
 from dataclasses import dataclass
 
-
 SPEECH_SUMMARY_AFTER_CHARS = 260
 SPEECH_SUMMARY_MAX_CHARS = 320
 
@@ -70,7 +69,9 @@ class SirinaSpeechIO:
             else:
                 from sirina.api import TextToSpeech
 
-                tts = TextToSpeech(voice=self.config.sirina.tts_voice, normalize_text=self.config.sirina.normalize_tts_text)
+                tts = TextToSpeech(
+                    voice=self.config.sirina.tts_voice, normalize_text=self.config.sirina.normalize_tts_text
+                )
                 try:
                     tts.play(spoken_text, output_device=self.config.audio.output_device)
                 except ValueError as exc:
@@ -118,7 +119,7 @@ class SirinaSpeechIO:
         if interrupted and process.poll() is None:
             process.terminate()
         try:
-            stdout, stderr = process.communicate(input=text)
+            process.communicate(input=text)
         finally:
             with self._tts_process_lock:
                 if self._tts_process is process:
@@ -127,11 +128,10 @@ class SirinaSpeechIO:
             return
         if process.returncode == 0:
             return
-        detail = stderr.strip() or stdout.strip()
         if process.returncode is not None and process.returncode < 0:
             signal_number = abs(process.returncode)
             raise RuntimeError(f"TTS backend crashed with signal {signal_number}; voice was skipped.")
-        raise RuntimeError(detail or f"TTS backend failed with exit code {process.returncode}.")
+        raise RuntimeError(f"TTS backend failed with exit code {process.returncode}; voice was skipped.")
 
 
 def summarize_for_speech(text: str, force: bool = False) -> str:
@@ -163,6 +163,11 @@ def _clean_summary_line(line: str) -> str:
 
 
 def _clean_spoken_text(text: str) -> str:
+    text = re.sub(
+        r"\b(job|sess)_[A-Za-z0-9_-]+\b",
+        lambda match: "job reference" if match.group(1) == "job" else "session reference",
+        text,
+    )
     text = re.sub(r"`([^`]*)`", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[*_#>~|]+", " ", text)
