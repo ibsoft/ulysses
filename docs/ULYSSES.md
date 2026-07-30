@@ -1,5 +1,9 @@
 # Ulysses
 
+**By [CyberPhylax](https://www.cyberphylax.com)**
+
+**Copyleft 2026 - Ioannis A. Bouhras <ioannis.bouhras@gmail.com>**
+
 Ulysses is a modular local-first Linux AI voice agent built on Sirina. The package is split into replaceable adapters for audio, wake-word detection, Sirina STT/TTS, sessions, FAISS memory, LLM providers, skills, security policy, and the terminal UI.
 
 ## Architecture

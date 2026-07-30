@@ -38,6 +38,9 @@ def test_installer_has_terminal_safe_ulysses_banner():
     assert "U L Y S S E S" in script
     assert "CYBER  SENTINEL" in script
     assert "LOCAL-FIRST SECURITY AGENT" in script
+    assert "by CyberPhylax" in script
+    assert "www.cyberphylax.com" in script
+    assert "Copyleft 2026 - Ioannis A. Bouhras <ioannis.bouhras@gmail.com>" in script
     assert '[[ -t 1 ]]' in script
     assert '[[ -z "${NO_COLOR:-}" ]]' in script
 

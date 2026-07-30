@@ -405,9 +405,9 @@ class UlyssesTextualApp(App):
 
     #logo {
         width: 24;
-        height: 10;
-        min-height: 10;
-        max-height: 10;
+        height: 12;
+        min-height: 12;
+        max-height: 12;
         align-horizontal: center;
         content-align: center middle;
         text-align: center;

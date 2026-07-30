@@ -1,5 +1,9 @@
 # Ulysses
 
+**By [CyberPhylax](https://www.cyberphylax.com)**
+
+**Copyleft 2026 - Ioannis A. Bouhras <ioannis.bouhras@gmail.com>**
+
 Ulysses is a local-first Kali/Linux security assistant built on Sirina. It is designed for authorized vulnerability assessment, penetration testing, security-tool operation, evidence collection, remediation guidance, and defensive monitoring of the local host. It combines a terminal UI, OpenAI-compatible LLM providers, local speech-to-text and text-to-speech, persistent sessions, semantic memory, skill execution, and command safety controls into one assistant runtime.
 
 The project also contains Sirina, the reusable local speech toolkit that powers Ulysses voice input and output.
