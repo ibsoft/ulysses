@@ -45,6 +45,15 @@ def test_installer_has_terminal_safe_ulysses_banner():
     assert '[[ -z "${NO_COLOR:-}" ]]' in script
 
 
+def test_installer_banner_has_continuous_equal_width_border():
+    script = INSTALLER.read_text(encoding="utf-8")
+    banner = script.split("cat <<'EOF'\n", 1)[1].split("\nEOF", 1)[0]
+    bordered_lines = [line for line in banner.splitlines() if line]
+
+    assert {len(line) for line in bordered_lines} == {54}
+    assert all(line[0] in "╭│╰" and line[-1] in "╮│╯" for line in bordered_lines)
+
+
 def test_installer_animates_each_phase_and_preserves_failure_output():
     script = INSTALLER.read_text(encoding="utf-8")
 

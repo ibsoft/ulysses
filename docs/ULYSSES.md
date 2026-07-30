@@ -365,6 +365,33 @@ microphone -> openWakeWord -> Sirina VAD recording -> Sirina STT -> LLM/skills -
 
 The current wake-word adapter is replaceable and intentionally small; if `openwakeword` is unavailable it falls back to push-to-talk/text operation rather than failing the agent.
 
+### Kokoro TTS Voice Selection
+
+Sirina's TTS backend uses Kokoro voices. Select a Kokoro voice ID through the `sirina.tts_voice` configuration key:
+
+```yaml
+sirina:
+  stt_engine: tdt
+  tts_voice: am_michael
+```
+
+For the current-user installation, edit `~/.config/ulysses/ulysses.yaml` and restart Ulysses. Available voice IDs are:
+
+| Κατηγορία | Voice IDs |
+| --- | --- |
+| Γυναικείες US | `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky` |
+| Γυναικείες UK | `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily` |
+| Ανδρικές US | `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck` |
+| Ανδρικές UK | `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` |
+
+Voice selection does not download missing models automatically at runtime. Install and validate the Kokoro/Sirina model
+set first:
+
+```bash
+sirina download --group all
+sirina check-models --group all
+```
+
 In the Textual TUI, press `F4`, speak, then pause to transcribe and submit the utterance. Press `F4` again or `Escape`
 to cancel recording. `/talk` provides the same one-shot microphone flow in the Rich fallback. Push-to-talk input is
 independent of `/voice off` and `/mute`, which control spoken responses.

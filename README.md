@@ -261,6 +261,26 @@ sirina download --group all
 sirina check-models --group all
 ```
 
+### Available Kokoro TTS Voices
+
+Sirina uses Kokoro for these TTS voices. Set the Kokoro voice ID through `sirina.tts_voice` in `config/ulysses.yaml` or the
+installed `~/.config/ulysses/ulysses.yaml`, then restart Ulysses:
+
+```yaml
+sirina:
+  tts_voice: am_michael
+```
+
+| Κατηγορία | Voice IDs |
+| --- | --- |
+| Γυναικείες US | `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky` |
+| Γυναικείες UK | `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily` |
+| Ανδρικές US | `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck` |
+| Ανδρικές UK | `bm_daniel`, `bm_fable`, `bm_george`, `bm_lewis` |
+
+The corresponding Kokoro/Sirina voice assets must be installed. Use `sirina download --group all` to download the
+supported model set and `sirina check-models --group all` to verify local files.
+
 Model lookup order:
 
 1. `SIRINA_MODEL_DIR`
