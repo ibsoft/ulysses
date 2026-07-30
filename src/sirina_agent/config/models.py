@@ -61,6 +61,15 @@ class ContextConfig(BaseModel):
     summary_target_chars: int = 3_000
 
 
+class SubagentConfig(BaseModel):
+    enabled: bool = True
+    root_dir: Path = Path("var/ulysses/subagents")
+    max_agents: int = 16
+    max_concurrent_jobs: int = 4
+    max_tool_rounds: int = 6
+    max_file_chars: int = 200_000
+
+
 class AutonomousConfig(BaseModel):
     check_interval_seconds: float = 90.0
     report_probability: float = 0.35
@@ -223,6 +232,7 @@ class UlyssesConfig(BaseModel):
     sirina: SirinaConfig = Field(default_factory=SirinaConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    subagents: SubagentConfig = Field(default_factory=SubagentConfig)
     autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)
     skills: SkillConfig = Field(default_factory=SkillConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)

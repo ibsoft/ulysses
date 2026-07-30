@@ -120,11 +120,14 @@ print_logo() {
 │                   ╰─┬──┬─╯                         │
 │                 ════╧══╧════                       │
 │                                                    │
+│                  by CyberPhylax                    │
+│               www.cyberphylax.com                 │
 │            LOCAL-FIRST SECURITY AGENT              │
 │                  INSTALLATION                      │
 │                                                    │
 ╰────────────────────────────────────────────────────╯
 EOF
+  printf '%s\n' 'Copyleft 2026 - Ioannis A. Bouhras <ioannis.bouhras@gmail.com>'
   printf '%s' "${RESET}"
 }
 

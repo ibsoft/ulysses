@@ -12,7 +12,7 @@ from threading import Thread
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Paste
+from textual.events import Key, Paste
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 
@@ -75,6 +75,14 @@ class ComposerInput(Input):
 
     def action_paste(self) -> None:
         self.app.action_paste_clipboard()
+
+    def on_key(self, event: Key) -> None:
+        if event.key not in {"up", "down"}:
+            return
+        navigate = getattr(self.app, "_navigate_command_history", None)
+        if navigate and navigate(event.key):
+            event.prevent_default()
+            event.stop()
 
 
 class SudoPasswordScreen(ModalScreen[str | None]):
@@ -405,9 +413,9 @@ class UlyssesTextualApp(App):
 
     #logo {
         width: 24;
-        height: 10;
-        min-height: 10;
-        max-height: 10;
+        height: 12;
+        min-height: 12;
+        max-height: 12;
         align-horizontal: center;
         content-align: center middle;
         text-align: center;
@@ -503,6 +511,9 @@ class UlyssesTextualApp(App):
         self.last_assistant_text = ""
         self.transcript_plain: list[str] = []
         self._last_user_text = ""
+        self._command_history: list[str] = []
+        self._command_history_index: int | None = None
+        self._command_history_draft = ""
         self._last_response_wants_report = False
         self._assessment_project: AssessmentProject | None = None
         self._assessment_install_attempted = False
@@ -521,6 +532,7 @@ class UlyssesTextualApp(App):
         self._spinner = cycle(self.SPINNER_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
+        self._subagent_collection_running = False
         self._boot_started_at = 0.0
         self._boot_message = ""
         self._boot_spoken_message = ""
@@ -606,6 +618,7 @@ class UlyssesTextualApp(App):
         self.connectors.start_all()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
+        self.set_interval(1.0, self._maybe_collect_subagent_reports)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
 
@@ -635,8 +648,42 @@ class UlyssesTextualApp(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
+        self._remember_command(text)
         event.input.value = ""
         self._submit_text(text)
+
+    def _remember_command(self, text: str) -> None:
+        if text and (not self._command_history or self._command_history[-1] != text):
+            self._command_history.append(text)
+            del self._command_history[:-200]
+        self._command_history_index = None
+        self._command_history_draft = ""
+
+    def _navigate_command_history(self, direction: str) -> bool:
+        if not self._command_history:
+            return False
+        composer = self.query_one("#composer", Input)
+        if direction == "up":
+            if self._command_history_index is None:
+                self._command_history_draft = composer.value
+                self._command_history_index = len(self._command_history) - 1
+            elif self._command_history_index > 0:
+                self._command_history_index -= 1
+        elif direction == "down":
+            if self._command_history_index is None:
+                return False
+            if self._command_history_index < len(self._command_history) - 1:
+                self._command_history_index += 1
+            else:
+                self._command_history_index = None
+                composer.value = self._command_history_draft
+                composer.cursor_position = len(composer.value)
+                return True
+        else:
+            return False
+        composer.value = self._command_history[self._command_history_index]
+        composer.cursor_position = len(composer.value)
+        return True
 
     def _submit_text(self, text: str) -> None:
         pending_paste = self._pending_paste
@@ -1138,6 +1185,7 @@ class UlyssesTextualApp(App):
             f"Version: {cfg.agent_version}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
+            f"Sub-agents:\n{self.orchestrator.subagents.status_detail(10, 100) if self.orchestrator.subagents else 'disabled'}\n"
             f"Connectors: {self.connectors.summary()}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
             f"Godmode: {cfg.skills.command.godmode}\n"
@@ -1591,6 +1639,7 @@ class UlyssesTextualApp(App):
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
             f"Active skill\n{active_skill}\n\n"
+            f"Sub-agents\n{self.orchestrator.subagents.status_detail() if self.orchestrator.subagents else 'disabled'}\n\n"
             f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Theme\n{self.theme_name}"
@@ -1598,6 +1647,31 @@ class UlyssesTextualApp(App):
 
     def _maybe_autonomous(self) -> None:
         self._start_autonomous_check(force=False)
+
+    def _maybe_collect_subagent_reports(self) -> None:
+        manager = getattr(self.orchestrator, "subagents", None)
+        if self._subagent_collection_running or not manager or not manager.completed_reports():
+            return
+        self._subagent_collection_running = True
+        Thread(target=self._collect_subagent_reports_in_thread, daemon=True).start()
+
+    def _collect_subagent_reports_in_thread(self) -> None:
+        try:
+            note = self.orchestrator.collect_subagent_reports()
+        except Exception as exc:
+            self.call_from_thread(self._finish_subagent_collection, None, str(exc))
+            return
+        self.call_from_thread(self._finish_subagent_collection, note, None)
+
+    def _finish_subagent_collection(self, note: str | None, error: str | None) -> None:
+        self._subagent_collection_running = False
+        if error:
+            self._write_error(f"Sub-agent report collection failed: {error}")
+        elif note:
+            self._write_assistant(note)
+            if self._should_speak_response(note):
+                self._speak(note)
+        self._refresh_status()
 
     def _autonomous_timer_seconds(self) -> float:
         cfg = self.orchestrator.config.autonomous

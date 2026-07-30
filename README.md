@@ -1,5 +1,9 @@
 # Ulysses
 
+**By [CyberPhylax](https://www.cyberphylax.com)**
+
+**Copyleft 2026 - Ioannis A. Bouhras <ioannis.bouhras@gmail.com>**
+
 Ulysses is a local-first Kali/Linux security assistant built on Sirina. It is designed for authorized vulnerability assessment, penetration testing, security-tool operation, evidence collection, remediation guidance, and defensive monitoring of the local host. It combines a terminal UI, OpenAI-compatible LLM providers, local speech-to-text and text-to-speech, persistent sessions, semantic memory, skill execution, and command safety controls into one assistant runtime.
 
 The project also contains Sirina, the reusable local speech toolkit that powers Ulysses voice input and output.
@@ -11,7 +15,11 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Stores conversations in SQLite and long-term memory in FAISS plus JSONL metadata.
 - Supports automatic context consolidation for long-running sessions.
 - Provides a Textual/Rich terminal UI with sessions, memory, voice toggles, themes, and slash commands.
+- Keeps an in-session composer history: Up recalls older submitted entries, Down moves forward, and returning past the
+  newest entry restores the unfinished draft.
 - Loads built-in and local skills through a registry.
+- Creates persistent specialist sub-agents with isolated prompts, workspaces, files, and task histories; delegates jobs in
+  the background and incorporates completed reports into later answers while the main chat remains available.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
 - Plans multi-step system inspection requests as separate tool operations, stores each output in the session, then summarizes the combined results.
 - Runs a deterministic external assessment baseline covering asset resolution, HTTP security controls, exposed services, web technologies, TLS configuration, web-server configuration, and vulnerability signatures.
@@ -34,6 +42,58 @@ docs/                    Extended Ulysses documentation
 tests/                   Agent, API, speech, memory, and config tests
 var/ulysses/             Local runtime data used by the default config
 ```
+
+## Persistent Sub-agents
+
+Ulysses can create a persistent specialist when a user request or complex task benefits from independent work. Creation,
+delegation, inspection, and deletion are exposed only as Ulysses tools; there is no direct user slash command that bypasses
+the supervisor. Ask naturally, for example: `Create a persistent TLS specialist and have it review this evidence.`
+
+Delegation is asynchronous. Ulysses returns after assigning the job, the composer remains available, and the sub-agent
+runs against the currently configured provider. The TUI polls for completion or failure reports and posts a concise
+supervisor update automatically; a report racing with a user message is instead injected into that answer. The sidebar and `F5`
+status show counts plus a `Delegated jobs` list with each responsible agent, shortened task, and current state. Active jobs
+are shown before recent completed or failed work. `F6` lists the four supervisor tools:
+
+- `subagent_create`: create a named persistent agent with a purpose and complete prompt.
+- `subagent_delegate`: assign a bounded background job and optional parent context.
+- `subagent_jobs`: list agents and job states.
+- `subagent_delete`: permanently remove an idle agent after typed confirmation.
+
+Persistent state is stored under `var/ulysses/subagents/<agent>/` with `agent.json`, `prompt.md`, `workspace/`, `files/`,
+and per-job request, metadata, and response files under `tasks/`. Installer upgrades preserve this runtime directory.
+Sub-agents report only to Ulysses. Their tools can list, read, and write UTF-8 files only inside their own workspace; they
+cannot create peers, run shell commands, handle sudo or secrets, bypass command policy, or answer the user directly.
+Before creating or delegating, the default prompt requires Ulysses to call `subagent_jobs`, reuse a suitable persistent
+agent, and avoid duplicate active assignments. This lookup occurs only for sub-agent workflows; the complete agent catalog
+is not added to unrelated conversation turns.
+
+### Sub-agent Smoke Test
+
+Restart Ulysses after an upgrade, press `F6`, and confirm that `subagent_create`, `subagent_delegate`, `subagent_jobs`, and
+`subagent_delete` are listed. Then send this request in normal chat:
+
+```text
+Create a persistent sub-agent named test_researcher. Its purpose is to summarize bounded technical notes. Give it a
+concise specialist prompt, then assign it a background job to write workspace file check.txt containing
+"sub-agent test successful" and report completion.
+```
+
+Expected behavior:
+
+1. Ulysses creates the agent and returns control to the composer after delegation; no slash command is required.
+2. `F5` shows one agent and a queued/running or completed job. You can continue chatting while the job runs.
+3. Ulysses posts a concise completion update automatically. Ask `Show the jobs for test_researcher` to inspect history.
+4. Restart Ulysses and ask `List my persistent sub-agents`; `test_researcher` and its prior job should still exist.
+5. Ask `Delete test_researcher`. Enter `/confirm <token>` using the displayed token. Deletion is refused while a job is active.
+
+For a development checkout, run the focused automated tests with:
+
+```bash
+.venv/bin/python -m pytest -q tests/agent/test_subagents.py
+```
+
+See [the extended sub-agent test guide](docs/ULYSSES.md#testing-sub-agents) for filesystem and isolation checks.
 
 ## Requirements
 

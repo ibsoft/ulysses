@@ -137,3 +137,53 @@ async def test_composer_ctrl_v_routes_to_full_clipboard_handler():
         await pilot.press("ctrl+v")
 
         assert app.clipboard_paste_calls == 1
+
+
+@pytest.mark.anyio
+async def test_composer_up_down_navigates_history_and_restores_draft(tmp_path):
+    config = UlyssesConfig()
+    config.memory.sqlite_path = tmp_path / "sessions.sqlite3"
+    config.memory.faiss_path = tmp_path / "memory.faiss"
+    config.memory.metadata_path = tmp_path / "memory.jsonl"
+    sessions = SessionStore(config.memory.sqlite_path)
+    memory = FaissMemoryStore(
+        config.memory.faiss_path,
+        config.memory.metadata_path,
+        LocalHashEmbeddingProvider(64),
+    )
+    app = UlyssesTextualApp(AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry()))
+    app._remember_command("first command")
+    app._remember_command("second command")
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", ComposerInput)
+        composer.focus()
+        composer.value = "unfinished draft"
+
+        await pilot.press("up")
+        assert composer.value == "second command"
+        await pilot.press("up")
+        assert composer.value == "first command"
+        await pilot.press("up")
+        assert composer.value == "first command"
+        await pilot.press("down")
+        assert composer.value == "second command"
+        await pilot.press("down")
+        assert composer.value == "unfinished draft"
+        if app._boot_timer is not None:
+            app._boot_timer.pause()
+
+
+def test_command_history_is_bounded_and_avoids_consecutive_duplicates():
+    app = object.__new__(UlyssesTextualApp)
+    app._command_history = []
+    app._command_history_index = None
+    app._command_history_draft = ""
+
+    for index in range(205):
+        app._remember_command(f"command {index}")
+    app._remember_command("command 204")
+
+    assert len(app._command_history) == 200
+    assert app._command_history[0] == "command 5"
+    assert app._command_history[-1] == "command 204"

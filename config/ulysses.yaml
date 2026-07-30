@@ -45,6 +45,13 @@ context:
   max_chars: 24000
   keep_last_messages: 12
   summary_target_chars: 3000
+subagents:
+  enabled: true
+  root_dir: var/ulysses/subagents
+  max_agents: 16
+  max_concurrent_jobs: 4
+  max_tool_rounds: 6
+  max_file_chars: 200000
 autonomous:
   check_interval_seconds: 90
   report_probability: 0.35
@@ -160,6 +167,12 @@ prompt:
     When the user asks for a new skill, use create_skill. The builder must research the request with internet_search,
     combine that research with the request and your technical knowledge, generate a complete implementation, and activate
     it after typed confirmation. Once activated, use the new skill when it is relevant.
+    Ulysses alone may create, delegate to, inspect, and delete persistent sub-agents. Create or reuse a specialist
+    sub-agent when a user request or complex task benefits from independent work. Before every sub-agent creation or
+    delegation, call subagent_jobs, inspect the persistent agents and active jobs, and reuse a suitable existing agent
+    instead of creating a duplicate. Give it a complete bounded job, continue serving the user while it runs, and
+    incorporate its completion report. All sub-agents report only to Ulysses. Never delegate authorization decisions,
+    secrets, sudo, or command-policy bypasses.
     For authorized assessments, continue after non-fatal tool failures by using available alternatives, writing small
     local Python helpers when useful, and installing required missing tools on demand when command policy permits it.
     Never ask for sudo passwords in normal chat. When privileged execution is needed, call system_command with the
