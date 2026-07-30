@@ -3,7 +3,9 @@ import threading
 import types
 
 import numpy as np
+import pytest
 
+from sirina.text import SpokenTextConverter
 from sirina_agent.audio.sirina_io import SirinaSpeechIO, VoiceState, summarize_for_speech
 from sirina_agent.config.models import UlyssesConfig
 
@@ -35,6 +37,29 @@ def test_summarize_for_speech_shortens_long_bullets():
     assert summary.startswith("Summary: Are all subdomains included")
     assert "Any particular focus areas" not in summary
     assert len(summary) <= 320
+
+
+def test_spoken_text_handles_long_subagent_job_ids():
+    converter = SpokenTextConverter()
+
+    spoken = converter.text_to_spoken("Reference 20260730151728")
+
+    assert "twenty trillion two hundred sixty billion" in spoken
+    assert "seven hundred twenty-eight" in spoken
+
+
+def test_speech_replaces_machine_ids_with_readable_references():
+    spoken = summarize_for_speech("Job ID: `job_20260730151728_84bfeac4`; session sess_20260730181737_ab12.")
+
+    assert spoken == "Job ID: job reference; session session reference."
+
+
+def test_spoken_text_falls_back_to_digits_beyond_known_scales():
+    converter = SpokenTextConverter()
+
+    spoken = converter._number_to_words(int("9" * 40))
+
+    assert spoken == " ".join(["nine"] * 40)
 
 
 def test_speak_retries_with_forced_summary_when_tts_text_is_too_long(monkeypatch):
@@ -91,6 +116,29 @@ def test_speak_isolates_tts_crash_in_subprocess(monkeypatch):
     assert calls
     assert calls[0][0][:3] == [sys.executable, "-m", "sirina_agent.audio.speak_worker"]
     assert voice.state.tts == "idle"
+
+
+def test_speak_hides_backend_tracebacks(monkeypatch):
+    class FakeProcess:
+        returncode = 1
+
+        def __init__(self, command, **kwargs):
+            pass
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, input):
+            return "", "Traceback (most recent call last):\n/private/path.py\nIndexError"
+
+    monkeypatch.setattr("sirina_agent.audio.sirina_io.subprocess.Popen", FakeProcess)
+    voice = SirinaSpeechIO(UlyssesConfig())
+
+    with pytest.raises(RuntimeError, match="TTS backend failed with exit code 1; voice was skipped") as error:
+        voice.speak("Job ID: job_20260730151728_84bfeac4")
+
+    assert "Traceback" not in str(error.value)
+    assert "/private/path.py" not in str(error.value)
 
 
 def test_interrupt_terminates_isolated_tts_process(monkeypatch):

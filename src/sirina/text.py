@@ -110,8 +110,10 @@ class SpokenTextConverter:
         try:
             if isinstance(num, str):
                 # Check if it's actually an integer in string form
-                if "." not in num or num.endswith(".0"):
-                    num = int(float(num))
+                if "." not in num:
+                    num = int(num)
+                elif num.endswith(".0"):
+                    num = int(num[:-2])
                 else:
                     num = float(num)
 
@@ -156,7 +158,20 @@ class SpokenTextConverter:
                 "eighty",
                 "ninety",
             ]
-            scales = ["", "thousand", "million", "billion"]
+            scales = [
+                "",
+                "thousand",
+                "million",
+                "billion",
+                "trillion",
+                "quadrillion",
+                "quintillion",
+                "sextillion",
+                "septillion",
+                "octillion",
+                "nonillion",
+                "decillion",
+            ]
 
             def process_chunk(n: int, scale: int) -> str:
                 """
@@ -213,6 +228,8 @@ class SpokenTextConverter:
             if isinstance(num, int):
                 if num == 0:
                     return "zero"
+                if len(str(num)) > len(scales) * 3:
+                    return " ".join(ones[int(digit)] for digit in str(num))
 
                 intermediate_result: list[str] = []
                 scale = 0
