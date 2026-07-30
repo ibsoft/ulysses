@@ -23,6 +23,14 @@ sirina:
   stt_engine: tdt
   tts_voice: am_michael
   isolate_tts_process: true
+connectors:
+  telegram:
+    enabled: false
+    token_env: TELEGRAM_BOT_TOKEN
+    state_path: var/ulysses/connectors/telegram.json
+    polling_timeout_seconds: 20
+    pairing_code_ttl_seconds: 600
+    max_message_chars: 3500
 memory:
   sqlite_path: var/ulysses/sessions.sqlite3
   faiss_path: var/ulysses/memory.faiss

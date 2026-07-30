@@ -7,14 +7,11 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class LLMConfig(BaseModel):
-    provider: Literal["openai", "oauth_compatible", "kimi", "ollama", "mock"] = "openai"
+    provider: Literal["openai", "openai_chatgpt", "kimi", "ollama", "mock"] = "openai"
     model: str = "gpt-4.1-mini"
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 60.0
-    oauth_token_env: str | None = None
-    oauth_keyring_service: str | None = None
-    oauth_keyring_username: str | None = None
 
 
 class AudioConfig(BaseModel):
@@ -86,6 +83,19 @@ class LoggingConfig(BaseModel):
 
 class TUIConfig(BaseModel):
     theme: Literal["ulysses_dark", "ulysses_light", "terminal"] = "ulysses_dark"
+
+
+class TelegramConnectorConfig(BaseModel):
+    enabled: bool = False
+    token_env: str = "TELEGRAM_BOT_TOKEN"
+    state_path: Path = Path("var/ulysses/connectors/telegram.json")
+    polling_timeout_seconds: float = 20.0
+    pairing_code_ttl_seconds: int = 600
+    max_message_chars: int = 3500
+
+
+class ConnectorConfig(BaseModel):
+    telegram: TelegramConnectorConfig = Field(default_factory=TelegramConnectorConfig)
 
 
 class PromptConfig(BaseModel):
@@ -217,6 +227,7 @@ class UlyssesConfig(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
+    connectors: ConnectorConfig = Field(default_factory=ConnectorConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
 
@@ -228,6 +239,4 @@ class UlyssesConfig(BaseModel):
         return value.strip()
 
     def model_dump_safe(self) -> dict[str, Any]:
-        data = self.model_dump(mode="json")
-        data["llm"].pop("oauth_token_env", None)
-        return data
+        return self.model_dump(mode="json")

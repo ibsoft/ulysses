@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 
+from sirina_agent.llm.openai_auth import codex_chatgpt_authenticated
+
 
 def startup_brief(orchestrator, voice_io=None) -> str:
     cfg = orchestrator.config
@@ -59,10 +61,11 @@ def _llm_status(cfg) -> tuple[bool, str]:
         if os.getenv(llm.api_key_env):
             return True, f"up ({llm.provider} / {llm.model})"
         return False, f"needs setup ({llm.api_key_env} missing)"
-    token_env = llm.oauth_token_env or ""
-    if token_env and os.getenv(token_env):
-        return True, f"up ({llm.provider} / {llm.model})"
-    return False, "needs setup (OAuth token missing)"
+    if llm.provider == "openai_chatgpt":
+        if not codex_chatgpt_authenticated():
+            return False, "needs setup (OpenAI browser login)"
+        return True, f"up (openai / {llm.model})"
+    return False, "needs provider setup"
 
 
 def _memory_status(orchestrator) -> tuple[bool, str]:

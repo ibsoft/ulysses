@@ -1,18 +1,40 @@
 from __future__ import annotations
 
-from datetime import datetime
-from itertools import cycle
+import os
 import shutil
 import subprocess
+import time
+from dataclasses import replace
+from datetime import datetime
+from itertools import cycle
 from threading import Thread
 
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.events import Paste
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+
+from sirina_agent.config import load_config
+from sirina_agent.config.provider_setup import (
+    ProviderSetup,
+    apply_provider_setup,
+    default_for,
+    env_path_for_config,
+    load_env_file,
+    provider_labels,
+)
+from sirina_agent.connectors.registry import ConnectorManager, connector_definitions
+from sirina_agent.connectors.setup import TelegramSetup, apply_telegram_setup
+from sirina_agent.connectors.telegram import TelegramConnector
 from sirina_agent.core.artifacts import (
     Artifact,
     ArtifactManager,
     AssessmentProject,
     assessment_command_for_text,
-    assessment_target,
     assessment_needs_voice,
+    assessment_target,
     attachment_prompt,
     is_assessment_continuation,
     is_assessment_request,
@@ -30,25 +52,10 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
-from sirina_agent.config import load_config
-from sirina_agent.tui.branding import ULYSSES_LOGO
-from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
-from sirina_agent.config.provider_setup import (
-    ProviderSetup,
-    apply_provider_setup,
-    default_for,
-    env_path_for_config,
-    load_env_file,
-    provider_labels,
-)
+from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
-
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
-from textual.events import Paste
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
+from sirina_agent.tui.branding import ULYSSES_LOGO
 
 
 class TranscriptLog(RichLog):
@@ -153,25 +160,45 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
             yield Label("Provider setup")
-            yield Static("Choose a provider, edit fields, then save. Secret fields are write-only.")
+            yield Static("OpenAI browser login opens your browser and stores no OAuth token in Ulysses.")
             with Horizontal(id="setup-provider-buttons"):
                 for provider, label in provider_labels():
                     yield Button(label, id=f"setup-provider-{provider}")
-            yield Label("Model")
-            yield Input(value=self.config.llm.model, id="setup-model", classes="setup-input")
-            yield Label("Base URL")
-            yield Input(value=self.config.llm.base_url, id="setup-base-url", classes="setup-input")
-            yield Label("API key environment variable")
-            yield Input(value=self.config.llm.api_key_env, id="setup-api-env", classes="setup-input")
-            yield Label("API key")
-            yield Input(password=True, placeholder="leave blank to keep existing key", id="setup-api-key", classes="setup-input")
-            yield Label("OAuth token environment variable")
-            yield Input(value=self.config.llm.oauth_token_env or "", id="setup-oauth-env", classes="setup-input")
-            yield Label("OAuth token")
-            yield Input(password=True, placeholder="leave blank to keep existing token", id="setup-oauth-token", classes="setup-input")
+            yield Label("Model", id="setup-model-label")
+            yield Input(
+                value=self.config.llm.model,
+                id="setup-model",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("Base URL", id="setup-base-url-label")
+            yield Input(
+                value=self.config.llm.base_url,
+                id="setup-base-url",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("API key environment variable", id="setup-api-env-label")
+            yield Input(
+                value=self.config.llm.api_key_env,
+                id="setup-api-env",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
+            yield Label("API key", id="setup-api-key-label")
+            yield Input(
+                password=True,
+                placeholder="leave blank to keep existing key",
+                id="setup-api-key",
+                classes="setup-input",
+                disabled=self.provider == "openai_chatgpt",
+            )
             with Horizontal(id="setup-actions"):
                 yield Button("Save", variant="primary", id="setup-save")
                 yield Button("Cancel", id="setup-cancel")
+
+    def on_mount(self) -> None:
+        self._toggle_provider_fields()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id or ""
@@ -183,8 +210,6 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
                     base_url=self.query_one("#setup-base-url", Input).value,
                     api_key_env=self.query_one("#setup-api-env", Input).value,
                     api_key=self.query_one("#setup-api-key", Input).value,
-                    oauth_token_env=self.query_one("#setup-oauth-env", Input).value,
-                    oauth_token=self.query_one("#setup-oauth-token", Input).value,
                 )
             )
             return
@@ -200,7 +225,156 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
         self.query_one("#setup-model", Input).value = default_for(provider, "model")
         self.query_one("#setup-base-url", Input).value = default_for(provider, "base_url")
         self.query_one("#setup-api-env", Input).value = default_for(provider, "api_key_env")
-        self.query_one("#setup-oauth-env", Input).value = default_for(provider, "oauth_token_env")
+        disabled = provider == "openai_chatgpt"
+        for selector in ("#setup-model", "#setup-base-url", "#setup-api-env", "#setup-api-key"):
+            self.query_one(selector, Input).disabled = disabled
+        self._toggle_provider_fields()
+
+    def _toggle_provider_fields(self) -> None:
+        visible = self.provider != "openai_chatgpt"
+        for selector in (
+            "#setup-model-label",
+            "#setup-model",
+            "#setup-base-url-label",
+            "#setup-base-url",
+            "#setup-api-env-label",
+            "#setup-api-env",
+            "#setup-api-key-label",
+            "#setup-api-key",
+        ):
+            self.query_one(selector).display = visible
+
+
+class OpenAICallbackScreen(ModalScreen[str | None]):
+    CSS = """
+    OpenAICallbackScreen { align: center middle; }
+    #openai-callback-dialog {
+        width: 100;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    #openai-login-actions, #openai-callback-actions { height: 3; margin-top: 1; }
+    """
+
+    def __init__(self, auth_url: str) -> None:
+        super().__init__()
+        self.auth_url = auth_url
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="openai-callback-dialog"):
+            yield Label("OpenAI browser login")
+            yield Static("Copy the login link, open it in your browser, and sign in to OpenAI.")
+            yield Input(value=self.auth_url, select_on_focus=True, id="openai-login-url")
+            with Horizontal(id="openai-login-actions"):
+                yield Button("Copy login link", variant="primary", id="openai-login-copy")
+            yield Static("Then paste the complete localhost return URL below. It is masked and not saved.")
+            yield Input(password=True, placeholder="http://localhost:.../auth/callback?...", id="openai-callback")
+            with Horizontal(id="openai-callback-actions"):
+                yield Button("Continue", variant="primary", id="openai-callback-submit")
+                yield Button("Cancel", id="openai-callback-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#openai-callback", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "openai-login-copy":
+            try:
+                self.app.copy_to_clipboard(self.auth_url)
+            except Exception as exc:
+                self.notify(f"Clipboard unavailable: {exc}", severity="error")
+                return
+            if _set_system_clipboard_text(self.auth_url):
+                self.notify("OpenAI login link copied.")
+            else:
+                login_input = self.query_one("#openai-login-url", Input)
+                login_input.focus()
+                self.notify("System clipboard unavailable. The login link is selected.", severity="warning")
+        elif event.button.id == "openai-callback-submit":
+            self.dismiss(self.query_one("#openai-callback", Input).value)
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value)
+
+
+class TelegramSetupScreen(ModalScreen[TelegramSetup | None]):
+    CSS = """
+    TelegramSetupScreen { align: center middle; }
+    #connector-dialog {
+        width: 68;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    #connector-token { margin: 1 0; }
+    #connector-actions { height: 3; }
+    """
+
+    def __init__(self, enabled: bool) -> None:
+        super().__init__()
+        self.enabled = enabled
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connector-dialog"):
+            yield Label("Telegram connector")
+            yield Static("Enter the BotFather token. It is stored only in the protected environment file.")
+            yield Input(password=True, placeholder="bot token; blank keeps existing token", id="connector-token")
+            with Horizontal(id="connector-actions"):
+                yield Button("Verify & connect", variant="primary", id="connector-connect")
+                if self.enabled:
+                    yield Button("Disable", variant="error", id="connector-disable")
+                yield Button("Cancel", id="connector-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#connector-token", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "connector-connect":
+            self.dismiss(TelegramSetup(True, self.query_one("#connector-token", Input).value))
+        elif event.button.id == "connector-disable":
+            self.dismiss(TelegramSetup(False))
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self.dismiss(TelegramSetup(True, event.value))
+
+
+class ConnectorSelectionScreen(ModalScreen[str | None]):
+    CSS = """
+    ConnectorSelectionScreen { align: center middle; }
+    #connector-selection {
+        width: 62;
+        height: auto;
+        border: thick $primary;
+        background: $panel;
+        padding: 1 2;
+    }
+    .connector-choice { width: 100%; margin-top: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="connector-selection"):
+            yield Label("Connector setup")
+            for definition in connector_definitions():
+                yield Static(definition.description)
+                yield Button(
+                    definition.label,
+                    id=f"connector-choice-{definition.id}",
+                    classes="connector-choice",
+                )
+            yield Button("Cancel", id="connector-choice-cancel", classes="connector-choice")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "connector-choice-cancel":
+            self.dismiss(None)
+        else:
+            self.dismiss(button_id.removeprefix("connector-choice-"))
 
 
 class UlyssesTextualApp(App):
@@ -319,6 +493,11 @@ class UlyssesTextualApp(App):
         self._spinner = cycle(self.SPINNER_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
+        self.connectors = ConnectorManager.from_config(
+            orchestrator.config,
+            self._handle_connector_message,
+            self._connector_event_from_worker,
+        )
         if hasattr(self.orchestrator, "set_activity_callback"):
             self.orchestrator.set_activity_callback(self._activity_from_worker)
 
@@ -368,7 +547,8 @@ class UlyssesTextualApp(App):
                     "/sessions\n"
                     "/downloads\n"
                     "/theme [name]\n"
-                    "/setup\n"
+                    "/setup providers\n"
+                    "/setup connectors\n"
                     "/copy [selected|all]\n"
                     "/select on|off\n"
                     "/quit",
@@ -388,6 +568,7 @@ class UlyssesTextualApp(App):
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self._write_system(boot_message)
         self._refresh_status()
+        self.connectors.start_all()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
@@ -784,7 +965,12 @@ class UlyssesTextualApp(App):
         elif cmd == "/reload":
             self.action_reload_config()
         elif cmd == "/setup":
-            self.action_setup()
+            if len(parts) > 1 and parts[1].lower() in {"provider", "providers"}:
+                self.action_setup()
+            elif len(parts) > 1 and parts[1].lower() in {"connector", "connectors"}:
+                self.action_connector_setup()
+            else:
+                self._write_system("Usage: /setup providers or /setup connectors")
         elif cmd == "/context":
             self._write_system(str(self.orchestrator.context_usage()))
         elif cmd == "/voice":
@@ -894,6 +1080,7 @@ class UlyssesTextualApp(App):
             f"Version: {cfg.agent_version}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
+            f"Connectors: {self.connectors.summary()}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
             f"Godmode: {cfg.skills.command.godmode}\n"
             f"Config path: {self.orchestrator.config_path}\n"
@@ -972,10 +1159,158 @@ class UlyssesTextualApp(App):
     def action_setup(self) -> None:
         self.push_screen(ProviderSetupScreen(self.orchestrator.config), self._finish_provider_setup)
 
+    def action_connector_setup(self) -> None:
+        self.push_screen(ConnectorSelectionScreen(), self._open_connector_setup)
+
+    def _open_connector_setup(self, connector_id: str | None) -> None:
+        if connector_id is None:
+            self._write_system("Connector setup cancelled.")
+            return
+        if connector_id == "telegram":
+            enabled = self.orchestrator.config.connectors.telegram.enabled
+            self.push_screen(TelegramSetupScreen(enabled), self._finish_telegram_setup)
+            return
+        self._write_error(f"Connector setup is not available: {connector_id}")
+
+    def _finish_telegram_setup(self, setup: TelegramSetup | None) -> None:
+        if setup is None:
+            self._write_system("Connector setup cancelled.")
+            return
+        if not setup.enabled:
+            self.connectors.remove("telegram")
+            apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, setup)
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self._write_system("Telegram connector disabled. Previously verified chats are retained locally.")
+            self._refresh_status()
+            return
+        self._start_waiting()
+        Thread(target=self._telegram_setup_in_thread, args=(setup,), daemon=True).start()
+
+    def _telegram_setup_in_thread(self, setup: TelegramSetup) -> None:
+        config_path = self.orchestrator.config_path
+        telegram_config = self.orchestrator.config.connectors.telegram.model_copy(update={"enabled": True})
+        token = setup.token.strip() or os.environ.get(telegram_config.token_env, "")
+        candidate = TelegramConnector(
+            telegram_config,
+            self._handle_connector_message,
+            self._connector_event_from_worker,
+            token=token,
+        )
+        try:
+            username = candidate.validate()
+            apply_telegram_setup(self.orchestrator.config, config_path, TelegramSetup(True, setup.token))
+            load_env_file(env_path_for_config(config_path))
+            self.orchestrator.config = load_config(config_path)
+            code = candidate.begin_pairing()
+            candidate.start()
+        except Exception as exc:
+            candidate.stop()
+            self.call_from_thread(self._finish_telegram_setup_error, str(exc))
+            return
+        self.call_from_thread(self._activate_telegram_connector, candidate, username, code)
+
+    def _activate_telegram_connector(self, connector: TelegramConnector, username: str, code: str) -> None:
+        self.connectors.replace(connector)
+        self._stop_waiting()
+        self._write_system(
+            f"Telegram connector verified: @{username}\n"
+            f"Open the bot and send: /verify {code}\n"
+            f"Pairing code expires in {connector.config.pairing_code_ttl_seconds // 60} minutes."
+        )
+        self._refresh_status()
+
+    def _finish_telegram_setup_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Telegram connector setup failed: {error}")
+        self._refresh_status()
+
+    def _connector_event_from_worker(self, message: str) -> None:
+        try:
+            self.call_from_thread(self._write_system, message)
+            self.call_from_thread(self._refresh_status)
+        except RuntimeError:
+            pass
+
+    def _handle_connector_message(self, connector_id: str, chat_id: int, text: str) -> str:
+        source = f"{connector_id.title()} {chat_id}"
+        try:
+            self.call_from_thread(self._write_user, f"[{source}] {text}")
+        except RuntimeError:
+            pass
+        lowered = text.strip().lower()
+        if lowered.startswith("/confirm"):
+            if self.orchestrator.pending_tool_requires_sudo_password():
+                response = "This command requires local sudo authentication. Confirm it in the local Ulysses console."
+            else:
+                parts = text.split(maxsplit=1)
+                token = parts[1].strip() if len(parts) == 2 else None
+                response = self.orchestrator.confirm_pending_tool(token)
+        elif lowered == "/cancel":
+            response = "Pending command cancelled." if self.orchestrator.cancel_pending_tool() else "No command is pending."
+        else:
+            response = self.orchestrator.handle_text(text)
+        try:
+            self.call_from_thread(self._write_assistant, f"[{source}] {response}")
+            self.call_from_thread(self._refresh_status)
+        except RuntimeError:
+            pass
+        return response
+
+    def on_unmount(self) -> None:
+        self.connectors.stop_all()
+        _stop_system_clipboard_owner()
+
     def _finish_provider_setup(self, setup: ProviderSetup | None) -> None:
         if setup is None:
             self._write_system("Provider setup cancelled.")
             return
+        if setup.provider == "openai_chatgpt":
+            self._start_waiting()
+            Thread(target=self._start_openai_login, args=(setup,), daemon=True).start()
+            return
+        self._activate_provider_setup(setup)
+
+    def _start_openai_login(self, setup: ProviderSetup) -> None:
+        login = OpenAIBrowserLogin()
+        try:
+            login.start()
+        except OpenAIBrowserLoginError as exc:
+            self.call_from_thread(self._provider_setup_error, str(exc))
+            return
+        self.call_from_thread(self._show_openai_callback, login, setup)
+
+    def _show_openai_callback(self, login: OpenAIBrowserLogin, setup: ProviderSetup) -> None:
+        self._stop_waiting()
+        self.push_screen(OpenAICallbackScreen(login.auth_url), lambda value: self._finish_openai_callback(value, login, setup))
+
+    def _finish_openai_callback(
+        self, callback_url: str | None, login: OpenAIBrowserLogin, setup: ProviderSetup
+    ) -> None:
+        if not callback_url:
+            login.close()
+            self._write_system("OpenAI browser login cancelled.")
+            return
+        self._start_waiting()
+        Thread(target=self._complete_openai_login, args=(callback_url, login, setup), daemon=True).start()
+
+    def _complete_openai_login(
+        self, callback_url: str, login: OpenAIBrowserLogin, setup: ProviderSetup
+    ) -> None:
+        try:
+            model = login.complete(callback_url)
+        except OpenAIBrowserLoginError as exc:
+            self.call_from_thread(self._provider_setup_error, str(exc))
+            return
+        resolved = replace(setup, model=model, base_url="", api_key_env="", api_key="")
+        self.call_from_thread(self._activate_provider_setup, resolved)
+
+    def _provider_setup_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Provider setup failed: {error}")
+        self._refresh_status()
+
+    def _activate_provider_setup(self, setup: ProviderSetup) -> None:
+        self._stop_waiting()
         config_path = self.orchestrator.config_path
         try:
             apply_provider_setup(self.orchestrator.config, config_path, setup)
@@ -1125,9 +1460,13 @@ class UlyssesTextualApp(App):
     def _copy_text(self, text: str, success_message: str) -> None:
         try:
             self.copy_to_clipboard(text)
-            self._write_system(success_message)
         except Exception as exc:
             self._write_error(f"Clipboard unavailable: {exc}")
+            return
+        if _set_system_clipboard_text(text):
+            self._write_system(success_message)
+        else:
+            self._write_error("System clipboard backend is unavailable.")
 
     def _selected_text(self) -> str:
         try:
@@ -1193,6 +1532,7 @@ class UlyssesTextualApp(App):
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
             f"Active skill\n{active_skill}\n\n"
+            f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Theme\n{self.theme_name}"
         )
@@ -1365,6 +1705,76 @@ def _system_clipboard_text() -> str:
         if result.returncode == 0 and result.stdout:
             return result.stdout.rstrip("\r\n")
     return ""
+
+
+_clipboard_owner_process: subprocess.Popen[str] | None = None
+
+
+def _set_system_clipboard_text(text: str) -> bool:
+    global _clipboard_owner_process
+    commands = [
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+        ["powershell.exe", "-NoProfile", "-Command", "Set-Clipboard"],
+    ]
+    for command in commands:
+        executable = shutil.which(command[0])
+        if executable is None:
+            continue
+        try:
+            result = subprocess.run(
+                [executable, *command[1:]],
+                input=text,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            return True
+
+    python = shutil.which("python3")
+    if python is None or not os.environ.get("DISPLAY"):
+        return False
+    owner = (
+        "import sys; from PyQt5.QtCore import QTimer; from PyQt5.QtWidgets import QApplication; "
+        "app=QApplication([]); clipboard=app.clipboard(); clipboard.setText(sys.stdin.read()); "
+        "timer=QTimer(); timer.timeout.connect(lambda: app.quit() if not clipboard.ownsClipboard() else None); "
+        "timer.start(1000); app.exec()"
+    )
+    if _clipboard_owner_process and _clipboard_owner_process.poll() is None:
+        _clipboard_owner_process.terminate()
+    try:
+        process = subprocess.Popen(
+            [python, "-c", owner],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        if process.stdin is None:
+            process.terminate()
+            return False
+        process.stdin.write(text)
+        process.stdin.close()
+    except OSError:
+        return False
+    time.sleep(0.2)
+    if process.poll() is not None:
+        return False
+    _clipboard_owner_process = process
+    return True
+
+
+def _stop_system_clipboard_owner() -> None:
+    global _clipboard_owner_process
+    process, _clipboard_owner_process = _clipboard_owner_process, None
+    if process and process.poll() is None:
+        process.terminate()
 
 
 def _set_terminal_mouse_capture(app, enabled: bool) -> None:

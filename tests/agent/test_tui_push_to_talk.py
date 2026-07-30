@@ -2,7 +2,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.events import Paste
 
-from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp
+from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp, _set_system_clipboard_text
 
 
 class PasteHarness(App):
@@ -31,6 +31,26 @@ def test_textual_tui_binds_ctrl_v_to_clipboard_paste():
     bindings = {(binding.key, binding.action) for binding in UlyssesTextualApp.BINDINGS}
 
     assert ("ctrl+v", "paste_clipboard") in bindings
+
+
+def test_system_clipboard_uses_discovered_native_writer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "sirina_agent.tui.textual_app.shutil.which",
+        lambda name: "/dynamic/clipboard" if name == "xclip" else None,
+    )
+
+    class Result:
+        returncode = 0
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs["input"]))
+        return Result()
+
+    monkeypatch.setattr("sirina_agent.tui.textual_app.subprocess.run", run)
+
+    assert _set_system_clipboard_text("login-url")
+    assert calls == [(["/dynamic/clipboard", "-selection", "clipboard"], "login-url")]
 
 
 def test_textual_tui_escape_stops_voice_with_priority():
