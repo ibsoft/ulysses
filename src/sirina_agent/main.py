@@ -10,8 +10,10 @@ from .llm.providers import build_provider
 from .memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
 from .security.commands import CommandPolicy, CommandRunner
 from .sessions.store import SessionStore
+from .skills.builtin.subagents import CreateSubagentSkill, DelegateSubagentSkill, DeleteSubagentSkill, SubagentJobsSkill
 from .skills.builtin.system_command import SystemCommandSkill
 from .skills.registry import default_registry
+from .subagents import SubagentManager
 from .tui.app import create_tui
 from .utils.logging import audit_logger, configure_logging
 
@@ -38,7 +40,16 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         config.skills.skills_dir,
         include_search=config.skills.internet_search_enabled,
     )
-    orchestrator = AgentOrchestrator(config, sessions, memory, build_provider(config.llm), skills, config_path)
+    subagents = None
+    if config.subagents.enabled:
+        subagents = SubagentManager(config.subagents, lambda: build_provider(config.llm))
+        skills.register(CreateSubagentSkill(subagents))
+        skills.register(DelegateSubagentSkill(subagents))
+        skills.register(SubagentJobsSkill(subagents))
+        skills.register(DeleteSubagentSkill(subagents))
+    orchestrator = AgentOrchestrator(config, sessions, memory, build_provider(config.llm), skills, config_path, subagents)
+    if subagents:
+        subagents.provider_factory = lambda: build_provider(orchestrator.config.llm)
     return orchestrator, SirinaSpeechIO(config)
 
 

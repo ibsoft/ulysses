@@ -17,13 +17,14 @@ MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
 
 
 class AgentOrchestrator:
-    def __init__(self, config, sessions, memory, llm, skills, config_path: str | Path | None = None) -> None:
+    def __init__(self, config, sessions, memory, llm, skills, config_path: str | Path | None = None, subagents=None) -> None:
         self.config = config
         self.config_path = Path(config_path).expanduser() if config_path else Path("config/ulysses.yaml")
         self.sessions = sessions
         self.memory = memory
         self.llm = llm
         self.skills = skills
+        self.subagents = subagents
         self.pending_tool: dict | None = None
         self.active_skill: str | None = None
         self.skill_resume_name: str | None = None
@@ -139,6 +140,23 @@ class AgentOrchestrator:
         self._activity("preparing prompt")
         system = self._system_prompt()
         messages = [{"role": "system", "content": system}]
+        subagent_reports = self.subagents.completed_reports() if self.subagents else []
+        if subagent_reports:
+            reports = "\n\n".join(
+                f"Sub-agent: {item['agent']}\nJob: {item['id']}\nTask: {item['task']}\n"
+                f"Status: {item['status']}\nReport:\n{item.get('response') or item.get('error') or 'No report supplied.'}"
+                for item in subagent_reports
+            )
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "New subordinate-agent reports are available below. They report to Ulysses, not the user. "
+                        "Use relevant results in this answer, verify uncertainty, and decide whether follow-up delegation is needed.\n\n"
+                        f"{reports}"
+                    ),
+                }
+            )
         session_summary = self.sessions.session_metadata(self.session_id).get("summary")
         if session_summary:
             messages.append({"role": "system", "content": f"Consolidated session context:\n{session_summary}"})
@@ -155,10 +173,15 @@ class AgentOrchestrator:
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            return self._handle_tool_calls(messages, message, tool_calls, tools)
+            content = self._handle_tool_calls(messages, message, tool_calls, tools)
+            if subagent_reports:
+                self.subagents.mark_reported([item["id"] for item in subagent_reports])
+            return content
         self._activity("saving answer")
         content = message.get("content") or ""
         self._save_assistant_message(content)
+        if subagent_reports:
+            self.subagents.mark_reported([item["id"] for item in subagent_reports])
         return content
 
     def _tool_schemas(self) -> list[dict]:
@@ -243,6 +266,47 @@ class AgentOrchestrator:
         if prompt_path and prompt_path.exists():
             prompt_parts.append(prompt_path.read_text(encoding="utf-8").strip())
         return "\n\n".join(part for part in prompt_parts if part)
+
+    def collect_subagent_reports(self) -> str | None:
+        with self._interaction_guard():
+            if not self.subagents:
+                return None
+            reports = self.subagents.completed_reports()
+            if not reports:
+                return None
+            report_context = "\n\n".join(
+                f"Sub-agent: {item['agent']}\nJob: {item['id']}\nTask: {item['task']}\n"
+                f"Status: {item['status']}\nReport:\n{item.get('response') or item.get('error') or 'No report supplied.'}"
+                for item in reports
+            )
+            self._activity("reviewing sub-agent reports")
+            response = self.llm.complete(
+                [
+                    {"role": "system", "content": self._system_prompt()},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are supervising completed background work. Give the user one concise progress update using the "
+                            "reports below. State outcomes and material uncertainty, do not expose internal paths, and mention any "
+                            "follow-up that Ulysses should perform. Do not claim unsupported results.\n\n"
+                            f"{report_context}"
+                        ),
+                    },
+                ],
+                tools=None,
+            )
+            content = (response["choices"][0]["message"].get("content") or "").strip()
+            if not content:
+                return None
+            job_ids = [item["id"] for item in reports]
+            self._save_assistant_message(
+                content,
+                {"subagent_reports": job_ids},
+                importance=0.4,
+                source_prefix="subagent",
+            )
+            self.subagents.mark_reported(job_ids)
+            return content
 
     def _direct_system_command(self, text: str) -> str | None:
         lowered = text.strip().lower()

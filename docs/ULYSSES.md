@@ -19,6 +19,7 @@ src/sirina_agent/
   sessions/                SQLite conversation persistence
   security/                command policy, confirmation and audit execution
   skills/                  skill manifests, registry, built-ins
+  subagents/               persistent subordinate-agent manager and isolated workspaces
   connectors/              remote connector protocol, registry, manager and adapters
   tui/                     Rich terminal interface and slash commands
 ```
@@ -66,6 +67,149 @@ context:
 ```
 
 The TUI shows an estimated context gauge. At 100%, Ulysses summarizes older messages and compacts the session automatically. If summarization fails because the provider is unavailable, Ulysses keeps the existing messages and continues without deleting history.
+
+## Persistent Sub-agents
+
+Ulysses is the sole supervisor for subordinate agents. It may create one because the user asks for a persistent specialist,
+or because a complex request benefits from independent bounded work. Users request the outcome in normal language; only
+the parent model can invoke `subagent_create`, `subagent_delegate`, `subagent_jobs`, and `subagent_delete`.
+Before creation or delegation, the default system prompt requires a `subagent_jobs` lookup. Ulysses checks persistent
+agents and active assignments, reuses a suitable specialist when one exists, and avoids duplicate active work. This adds
+a tool call only to sub-agent workflows rather than spending context tokens on a full catalog during every normal turn.
+
+Each agent persists under the configured `subagents.root_dir` with its own identity metadata, system prompt, isolated
+workspace, general files directory, and task history. Every job records its request and state. Successful jobs also save a
+Markdown completion report. Jobs interrupted by a restart are marked failed explicitly so Ulysses can decide whether to
+delegate them again rather than silently losing work.
+
+Delegation uses a bounded thread pool and returns a job ID immediately. The TUI therefore accepts further conversation
+while jobs run. It collects newly completed and failed reports and posts a supervisor update automatically. If a user
+turn is already in progress, the reports are injected into that parent response instead. Ulysses incorporates relevant
+results, handles uncertainty, and marks reports delivered only after a successful parent response. The sidebar and `F5`
+status include a `Delegated jobs` section showing which agent owns each recent task and whether it is queued, running,
+completed, or failed. Active work is listed first; complete history remains available through `subagent_jobs`.
+
+```yaml
+subagents:
+  enabled: true
+  root_dir: var/ulysses/subagents
+  max_agents: 16
+  max_concurrent_jobs: 4
+  max_tool_rounds: 6
+  max_file_chars: 200000
+```
+
+Sub-agents use the provider and model active when their job starts. They receive only confined `workspace_list`,
+`workspace_read`, and `workspace_write` tools. Resolved paths must remain under that agent's workspace, file sizes are
+capped, and nested agent creation, command execution, sudo, credentials, policy changes, and direct user replies are not
+available. Ulysses retains final responsibility for authorization and the answer. Deletion is refused while jobs are
+active and otherwise requires typed confirmation because it removes the complete persistent workspace.
+
+### Testing Sub-agents
+
+Use a disposable name such as `test_researcher`. These steps test registration, asynchronous delegation, automatic report
+collection, workspace writes, persistence, isolation, and deletion.
+
+#### 1. Verify Registration
+
+Restart Ulysses, press `F6`, and verify these enabled skills are present:
+
+```text
+subagent_create
+subagent_delegate
+subagent_jobs
+subagent_delete
+```
+
+Press `F5`. The status output should include `Sub-agents`, even when the count is zero. There is intentionally no direct
+`/create-subagent` command: creation and delegation go through the supervising Ulysses model.
+
+#### 2. Create and Delegate
+
+Send this as one normal chat message:
+
+```text
+Create a persistent sub-agent named test_researcher. Its purpose is to summarize bounded technical notes. Give it a
+concise specialist prompt, then assign it a background job to write workspace file check.txt containing
+"sub-agent test successful" and report completion.
+```
+
+Ulysses should invoke `subagent_create`, then `subagent_delegate`. Delegation should return a `job_...` identifier quickly.
+The composer should become available while the job is queued or running. Send an unrelated question immediately to verify
+that the main conversation remains usable; the sub-agent uses a separate provider instance.
+
+#### 3. Observe Completion
+
+The sidebar and `F5` show agent, active-job, and completed-job counts followed by `Delegated jobs`. While work runs, verify
+that it includes `[running] test_researcher` and the shortened assignment. When the job finishes, its state changes to
+`[completed]` and Ulysses posts one concise supervisor update automatically. If a user response is already being composed,
+the report is incorporated into that answer instead of producing a duplicate update.
+
+Ask:
+
+```text
+Show all jobs and their status for test_researcher.
+```
+
+Ulysses should use `subagent_jobs` and show the job as `completed` or clearly report a persisted failure that can be retried.
+
+#### 4. Verify Files and Persistence
+
+For the default current-user installation, inspect the persistent files from another terminal:
+
+```bash
+find ~/.ulysses/app/var/ulysses/subagents/test_researcher -maxdepth 4 -type f -print
+cat ~/.ulysses/app/var/ulysses/subagents/test_researcher/workspace/check.txt
+```
+
+Expected files include `agent.json`, `prompt.md`, task `job.json`, `request.md`, `response.md`, and `workspace/check.txt`.
+The final command should print `sub-agent test successful` if the model followed the workspace-writing assignment.
+
+Quit and restart Ulysses, then ask:
+
+```text
+List my persistent sub-agents and the latest job for test_researcher.
+```
+
+The same agent and task history should remain. An interrupted queued or running job is deliberately persisted as `failed`
+on restart so Ulysses can report and retry it rather than silently losing it.
+
+#### 5. Verify Workspace Isolation
+
+Assign this bounded negative test:
+
+```text
+Ask test_researcher to attempt to write ../../ulysses-subagent-escape.txt using its workspace tool and report the result.
+```
+
+The write should be rejected as escaping the configured workspace. Confirm that no file was created:
+
+```bash
+test ! -e ~/.ulysses/app/var/ulysses/subagents/ulysses-subagent-escape.txt && echo "isolation passed"
+```
+
+#### 6. Delete the Test Agent
+
+After all jobs finish, ask:
+
+```text
+Delete the persistent sub-agent test_researcher.
+```
+
+Ulysses displays a typed confirmation token. Submit `/confirm <token>` with that exact token. The agent directory should be
+removed. Deletion while a job is queued or running must be refused.
+
+#### 7. Run Automated Tests
+
+From the development checkout:
+
+```bash
+.venv/bin/python -m pytest -q tests/agent/test_subagents.py
+.venv/bin/python -m pytest -q
+```
+
+The focused suite verifies background completion, report handoff, persistence, path traversal rejection, workspace file
+writes, and confirmed deletion. The full suite checks that the feature does not regress the rest of Ulysses.
 
 Default skills:
 
@@ -331,6 +475,11 @@ verification flow, register its definition and factory, and add its setup form. 
 and source-aware message routing are provided by `ConnectorManager`.
 
 When `textual` is installed, Ulysses starts a full-screen TUI with transcript, sidebar status, themes, paste-friendly input, clipboard copy for the last assistant response, and shortcuts:
+
+The command composer keeps the latest 200 non-empty submissions for the current Ulysses process. Press Up to recall older
+entries and Down to move toward newer entries. If text was present before history navigation, moving Down past the newest
+entry restores that unfinished draft. Consecutive duplicate submissions are stored once; history is not written to a
+separate plaintext history file.
 
 - `Ctrl+U`: voice responses on/off
 - `Ctrl+M`: mute
