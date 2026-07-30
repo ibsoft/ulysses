@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class LLMConfig(BaseModel):
@@ -107,10 +107,78 @@ class ConnectorConfig(BaseModel):
     telegram: TelegramConnectorConfig = Field(default_factory=TelegramConnectorConfig)
 
 
+class MCPServerConfig(BaseModel):
+    id: str
+    enabled: bool = True
+    transport: Literal["stdio", "streamable_http"] = "stdio"
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    url: str = ""
+    environment_variables: list[str] = Field(default_factory=list)
+    bearer_token_env: str = ""
+    tool_allowlist: list[str] = Field(default_factory=list)
+    risk_level: Literal["low", "medium", "high"] = "high"
+    require_confirmation: bool = True
+    timeout_seconds: float = Field(default=60.0, ge=1.0, le=600.0)
+
+    @field_validator("id")
+    @classmethod
+    def valid_id(cls, value: str) -> str:
+        normalized = value.strip().lower().replace("-", "_")
+        if not normalized or len(normalized) > 40 or not normalized[0].isalpha():
+            raise ValueError("MCP server id must start with a letter and contain at most 40 characters")
+        if any(not (character.isalnum() or character == "_") for character in normalized):
+            raise ValueError("MCP server id may contain only letters, numbers, and underscores")
+        return normalized
+
+    @field_validator("environment_variables")
+    @classmethod
+    def valid_environment_variables(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value or not (value[0].isalpha() or value[0] == "_"):
+                raise ValueError("MCP environment-variable names must be valid identifiers")
+            if any(not (character.isalnum() or character == "_") for character in value):
+                raise ValueError("MCP environment-variable names must be valid identifiers")
+        return list(dict.fromkeys(values))
+
+    @field_validator("bearer_token_env")
+    @classmethod
+    def valid_bearer_token_environment(cls, value: str) -> str:
+        if not value:
+            return value
+        return cls.valid_environment_variables([value])[0]
+
+    @model_validator(mode="after")
+    def transport_target(self):
+        if self.transport == "stdio" and not self.command.strip():
+            raise ValueError("stdio MCP servers require a command")
+        if self.transport == "streamable_http" and not self.url.strip():
+            raise ValueError("Streamable HTTP MCP servers require a URL")
+        return self
+
+
+class MCPConfig(BaseModel):
+    enabled: bool = False
+    servers: list[MCPServerConfig] = Field(default_factory=list)
+    allowed_stdio_commands: list[str] = Field(
+        default_factory=lambda: ["python", "python3", "uv", "uvx", "node", "npx", "docker"]
+    )
+    artifacts_dir: Path = Path("var/ulysses/mcp/artifacts")
+    max_output_chars: int = Field(default=50_000, ge=1_000, le=1_000_000)
+    max_tools_per_server: int = Field(default=50, ge=1, le=200)
+    max_description_chars: int = Field(default=500, ge=80, le=2_000)
+
+    @model_validator(mode="after")
+    def unique_server_ids(self):
+        ids = [server.id for server in self.servers]
+        if len(ids) != len(set(ids)):
+            raise ValueError("MCP server ids must be unique")
+        return self
+
+
 class PromptConfig(BaseModel):
     personality: str = (
-        "Pragmatic, calm, technically rigorous, concise, and security-aware. "
-        "Speak like a capable local Linux operator."
+        "Pragmatic, calm, technically rigorous, concise, and security-aware. Speak like a capable local Linux operator."
     )
     instructions: str = (
         "You are a local-first Linux voice agent. Use concise answers. "
@@ -202,7 +270,9 @@ class CommandSkillConfig(BaseModel):
             "which",
         ]
     )
-    denied_commands: list[str] = Field(default_factory=lambda: ["rm", "sudo", "su", "chmod", "chown", "mkfs", "mount", "umount"])
+    denied_commands: list[str] = Field(
+        default_factory=lambda: ["rm", "sudo", "su", "chmod", "chown", "mkfs", "mount", "umount"]
+    )
     working_directory: Path = Path(".")
     timeout_seconds: float = 300.0
     max_output_chars: int = 50_000
@@ -238,6 +308,7 @@ class UlyssesConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
     connectors: ConnectorConfig = Field(default_factory=ConnectorConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
 

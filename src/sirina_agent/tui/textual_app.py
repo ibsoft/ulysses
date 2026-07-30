@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -14,7 +15,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.events import Key, Paste
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Select, Static
 
 from sirina_agent.config import load_config
 from sirina_agent.config.provider_setup import (
@@ -54,6 +55,8 @@ from sirina_agent.core.assessment import (
 )
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
+from sirina_agent.mcp.client import SDKMCPClient
+from sirina_agent.mcp.setup import MCPServerSetup, apply_mcp_server_setup
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_SIDEBAR_LOGO, ULYSSES_SPEAKING_LOGOS
 
@@ -385,6 +388,162 @@ class ConnectorSelectionScreen(ModalScreen[str | None]):
             self.dismiss(button_id.removeprefix("connector-choice-"))
 
 
+class MCPSelectionScreen(ModalScreen[str | None]):
+    CSS = """
+    MCPSelectionScreen { align: center middle; }
+    #mcp-selection { width: 68; height: auto; max-height: 80%; border: thick $primary; background: $panel; padding: 1 2; }
+    .mcp-choice { width: 100%; margin-top: 1; }
+    """
+
+    def __init__(self, servers) -> None:
+        super().__init__()
+        self.servers = servers
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="mcp-selection"):
+            yield Label("MCP servers")
+            yield Static("Select a server to edit or add a new isolated MCP connection.")
+            for server in self.servers:
+                state = "enabled" if server.enabled else "disabled"
+                yield Button(
+                    f"{server.id}  ({server.transport}, {state})", id=f"mcp-edit-{server.id}", classes="mcp-choice"
+                )
+            yield Button("Add MCP server", variant="primary", id="mcp-add", classes="mcp-choice")
+            yield Button("Cancel", id="mcp-cancel", classes="mcp-choice")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id == "mcp-add":
+            self.dismiss("")
+        elif button_id == "mcp-cancel":
+            self.dismiss(None)
+        else:
+            self.dismiss(button_id.removeprefix("mcp-edit-"))
+
+
+class MCPSetupScreen(ModalScreen[MCPServerSetup | None]):
+    CSS = """
+    MCPSetupScreen { align: center middle; }
+    #mcp-dialog { width: 88; height: 90%; border: thick $primary; background: $panel; padding: 1 2; }
+    #mcp-fields { height: 1fr; }
+    .mcp-input { margin-bottom: 1; }
+    .mcp-select { margin-bottom: 1; }
+    #mcp-actions { height: 3; margin-top: 1; }
+    """
+
+    def __init__(self, server=None) -> None:
+        super().__init__()
+        self.server = server
+
+    def compose(self) -> ComposeResult:
+        server = self.server
+        with Vertical(id="mcp-dialog"):
+            yield Label("MCP server setup")
+            yield Static(
+                "Tools remain unavailable until this connection is validated. Secrets are stored only in the protected env file."
+            )
+            with VerticalScroll(id="mcp-fields"):
+                yield Label("Server ID")
+                yield Input(
+                    value=server.id if server else "",
+                    placeholder="company_tools",
+                    disabled=bool(server),
+                    id="mcp-id",
+                    classes="mcp-input",
+                )
+                yield Label("Transport")
+                yield Select(
+                    [("stdio", "stdio"), ("Streamable HTTP", "streamable_http")],
+                    value=server.transport if server else "stdio",
+                    allow_blank=False,
+                    id="mcp-transport",
+                    classes="mcp-select",
+                )
+                yield Label("Command (stdio)")
+                yield Input(
+                    value=server.command if server else "", placeholder="python3", id="mcp-command", classes="mcp-input"
+                )
+                yield Label("Arguments as JSON array (stdio)")
+                yield Input(
+                    value=json.dumps(server.args if server else []),
+                    placeholder='["server.py"]',
+                    id="mcp-args",
+                    classes="mcp-input",
+                )
+                yield Label("MCP URL (Streamable HTTP)")
+                yield Input(
+                    value=server.url if server else "",
+                    placeholder="https://example.com/mcp",
+                    id="mcp-url",
+                    classes="mcp-input",
+                )
+                yield Label("Environment variable names, comma separated")
+                yield Input(
+                    value=", ".join(server.environment_variables) if server else "", id="mcp-env", classes="mcp-input"
+                )
+                yield Label("Bearer token environment variable")
+                yield Input(
+                    value=server.bearer_token_env if server else "",
+                    placeholder="MCP_ACCESS_TOKEN",
+                    id="mcp-token-env",
+                    classes="mcp-input",
+                )
+                yield Label("Bearer token (blank keeps existing)")
+                yield Input(password=True, id="mcp-token", classes="mcp-input")
+                yield Label("Allowed tool names, comma separated; use * only when all server tools are trusted")
+                yield Input(
+                    value=", ".join(server.tool_allowlist) if server else "", id="mcp-tools", classes="mcp-input"
+                )
+                yield Label("Risk")
+                yield Select(
+                    [("High", "high"), ("Medium", "medium"), ("Low", "low")],
+                    value=server.risk_level if server else "high",
+                    allow_blank=False,
+                    id="mcp-risk",
+                    classes="mcp-select",
+                )
+                yield Label("Timeout seconds")
+                yield Input(value=str(server.timeout_seconds if server else 60), id="mcp-timeout", classes="mcp-input")
+                yield Checkbox("Enabled", value=server.enabled if server else True, id="mcp-enabled")
+                yield Checkbox(
+                    "Require confirmation for every MCP tool call",
+                    value=server.require_confirmation if server else True,
+                    id="mcp-confirm",
+                )
+            with Horizontal(id="mcp-actions"):
+                yield Button("Validate & save", variant="primary", id="mcp-save")
+                yield Button("Cancel", id="mcp-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "mcp-save":
+            self.dismiss(None)
+            return
+        try:
+            args = json.loads(self.query_one("#mcp-args", Input).value or "[]")
+            if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+                raise ValueError("Arguments must be a JSON array of strings.")
+            setup = MCPServerSetup(
+                id=self.query_one("#mcp-id", Input).value,
+                enabled=self.query_one("#mcp-enabled", Checkbox).value,
+                transport=str(self.query_one("#mcp-transport", Select).value),
+                command=self.query_one("#mcp-command", Input).value,
+                args=tuple(args),
+                url=self.query_one("#mcp-url", Input).value,
+                environment_variables=tuple(_csv(self.query_one("#mcp-env", Input).value)),
+                bearer_token_env=self.query_one("#mcp-token-env", Input).value.strip(),
+                bearer_token=self.query_one("#mcp-token", Input).value,
+                tool_allowlist=tuple(_csv(self.query_one("#mcp-tools", Input).value)),
+                risk_level=str(self.query_one("#mcp-risk", Select).value),
+                require_confirmation=self.query_one("#mcp-confirm", Checkbox).value,
+                timeout_seconds=float(self.query_one("#mcp-timeout", Input).value),
+            )
+            setup.server_config()
+        except (ValueError, TypeError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.dismiss(setup)
+
+
 class UlyssesTextualApp(App):
     TITLE = "Ulysses"
     SUB_TITLE = "local-first AI voice agent"
@@ -544,6 +703,8 @@ class UlyssesTextualApp(App):
             self._handle_connector_message,
             self._connector_event_from_worker,
         )
+        if getattr(self.orchestrator, "mcp", None):
+            self.orchestrator.mcp.event_callback = self._mcp_event_from_worker
         if hasattr(self.orchestrator, "set_activity_callback"):
             self.orchestrator.set_activity_callback(self._activity_from_worker)
 
@@ -595,6 +756,8 @@ class UlyssesTextualApp(App):
                     "/theme [name]\n"
                     "/setup providers\n"
                     "/setup connectors\n"
+                    "/setup mcp\n"
+                    "/mcp [servers|tools|reconnect]\n"
                     "/copy [selected|all]\n"
                     "/select on|off\n"
                     "/quit",
@@ -707,11 +870,19 @@ class UlyssesTextualApp(App):
             self._open_sudo_password_dialog(pending.get("token"))
             return
         new_assessment = is_assessment_request(original_text)
-        assessment_request = new_assessment or (self._assessment_project is not None and is_assessment_continuation(original_text))
-        if assessment_request and self.orchestrator.pending_tool is not None and not self.orchestrator.pending_tool_requires_sudo_password():
+        assessment_request = new_assessment or (
+            self._assessment_project is not None and is_assessment_continuation(original_text)
+        )
+        if (
+            assessment_request
+            and self.orchestrator.pending_tool is not None
+            and not self.orchestrator.pending_tool_requires_sudo_password()
+        ):
             self.orchestrator.pending_tool = None
         if new_assessment:
-            self._assessment_project = self.artifacts.create_assessment_project(self.orchestrator.session_id, original_text)
+            self._assessment_project = self.artifacts.create_assessment_project(
+                self.orchestrator.session_id, original_text
+            )
             self._assessment_install_attempted = False
             self._assessment_resume_target = None
             self._assessment_pending_check = None
@@ -734,8 +905,16 @@ class UlyssesTextualApp(App):
                     self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
                 self._refresh_status()
                 self._start_waiting()
-                target = assessment_target(original_text) or assessment_target(_project_request(self._assessment_project)) or "target"
-                Thread(target=self._assessment_command_in_thread, args=(direct_command, self._assessment_project, target), daemon=True).start()
+                target = (
+                    assessment_target(original_text)
+                    or assessment_target(_project_request(self._assessment_project))
+                    or "target"
+                )
+                Thread(
+                    target=self._assessment_command_in_thread,
+                    args=(direct_command, self._assessment_project, target),
+                    daemon=True,
+                ).start()
                 return
             target = assessment_target(original_text) or assessment_target(_project_request(self._assessment_project))
             if assessment_turn and target:
@@ -826,7 +1005,9 @@ class UlyssesTextualApp(App):
             return
         self.call_from_thread(self._finish_answer, answer)
 
-    def _assessment_command_in_thread(self, command: str, project: AssessmentProject | None = None, target: str | None = None) -> None:
+    def _assessment_command_in_thread(
+        self, command: str, project: AssessmentProject | None = None, target: str | None = None
+    ) -> None:
         try:
             answer, ok = _run_system_command_capture(self.orchestrator, command)
         except Exception as exc:
@@ -974,7 +1155,9 @@ class UlyssesTextualApp(App):
             self._assessment_resume_target = None
             self._assessment_pending_check = None
             lowered = tool_result.lower()
-            ok = not any(marker in lowered for marker in ("failed", "error", "incorrect password", "not found", "timed out"))
+            ok = not any(
+                marker in lowered for marker in ("failed", "error", "incorrect password", "not found", "timed out")
+            )
             completed = AssessmentResult(check, tool_result, ok)
             self._assessment_results.append(completed)
             self._assessment_completed_commands.add(check.command)
@@ -1030,7 +1213,9 @@ class UlyssesTextualApp(App):
             self._write_system("Created a new session.")
         elif cmd == "/sessions":
             rows = self.orchestrator.sessions.list_sessions()
-            self._write_system("\n".join(f"{row['id']}  {row['title']}  {row['updated_at']}" for row in rows) or "No sessions.")
+            self._write_system(
+                "\n".join(f"{row['id']}  {row['title']}  {row['updated_at']}" for row in rows) or "No sessions."
+            )
         elif cmd == "/downloads":
             self._write_downloads()
         elif cmd == "/switch" and len(parts) > 1:
@@ -1046,7 +1231,9 @@ class UlyssesTextualApp(App):
                 self.orchestrator.erase_user_data()
                 self._write_system("Erased all sessions and memory.")
             else:
-                self._write_system("Forgot memory." if self.orchestrator.memory.forget(parts[1]) else "Memory not found.")
+                self._write_system(
+                    "Forgot memory." if self.orchestrator.memory.forget(parts[1]) else "Memory not found."
+                )
         elif cmd == "/confirm":
             token = parts[1] if len(parts) > 1 else None
             if self.orchestrator.pending_tool_requires_sudo_password():
@@ -1069,17 +1256,22 @@ class UlyssesTextualApp(App):
             self.action_status()
         elif cmd == "/reload":
             self.action_reload_config()
+        elif cmd == "/mcp":
+            self._mcp_command(parts)
         elif cmd == "/setup":
             if len(parts) > 1 and parts[1].lower() in {"provider", "providers"}:
                 self.action_setup()
             elif len(parts) > 1 and parts[1].lower() in {"connector", "connectors"}:
                 self.action_connector_setup()
+            elif len(parts) > 1 and parts[1].lower() == "mcp":
+                self.action_mcp_setup()
             else:
-                self._write_system("Usage: /setup providers or /setup connectors")
+                self._write_system("Usage: /setup providers, /setup connectors, or /setup mcp")
         elif cmd == "/context":
             self._write_system(str(self.orchestrator.context_usage()))
         elif cmd == "/voice":
             self._voice_command(parts)
+
         elif cmd == "/talk":
             self.action_push_to_talk()
         elif cmd == "/mute":
@@ -1106,10 +1298,40 @@ class UlyssesTextualApp(App):
             else:
                 self.action_selection_mode()
         elif cmd == "/export":
-            self._write_system(str({"sessions": self.orchestrator.sessions.list_sessions(), "memory": [item.__dict__ for item in self.orchestrator.memory.items]}))
+            self._write_system(
+                str(
+                    {
+                        "sessions": self.orchestrator.sessions.list_sessions(),
+                        "memory": [item.__dict__ for item in self.orchestrator.memory.items],
+                    }
+                )
+            )
         else:
             self._write_error("Unknown command.")
         self._refresh_status()
+
+    def _mcp_command(self, parts: list[str]) -> None:
+        manager = self.orchestrator.mcp
+        if not manager:
+            self._write_system("MCP is unavailable.")
+            return
+        action = parts[1].lower() if len(parts) > 1 else "servers"
+        if action in {"servers", "status"}:
+            self._write_system(manager.status_detail())
+        elif action == "tools":
+            names = [
+                manifest.name for manifest in self.orchestrator.skills.manifests() if manifest.name.startswith("mcp__")
+            ]
+            self._write_system("\n".join(names) or "No MCP tools are registered.")
+        elif action == "reconnect" and len(parts) > 2:
+            try:
+                manager.discover(parts[2])
+            except KeyError as exc:
+                self._write_error(str(exc))
+                return
+            self._write_system(f"MCP reconnection started: {parts[2]}")
+        else:
+            self._write_system("Usage: /mcp servers, /mcp tools, or /mcp reconnect <server>")
 
     def _confirm_with_sudo_password(self, token: str | None, password: str | None) -> None:
         composer = self.query_one("#composer", Input)
@@ -1155,7 +1377,9 @@ class UlyssesTextualApp(App):
         mode = parts[1].lower()
         if mode == "on":
             self.orchestrator.set_autonomous(True)
-            self._write_system("Autonomous defense: on. I will run periodic host checks, log the evidence, adapt check frequency when risk rises, and report defensive actions.")
+            self._write_system(
+                "Autonomous defense: on. I will run periodic host checks, log the evidence, adapt check frequency when risk rises, and report defensive actions."
+            )
         elif mode == "off":
             self.orchestrator.set_autonomous(False)
             self._write_system("Autonomous defense: off.")
@@ -1186,6 +1410,7 @@ class UlyssesTextualApp(App):
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
             f"Sub-agents:\n{self.orchestrator.subagents.status_detail(10, 100) if self.orchestrator.subagents else 'disabled'}\n"
+            f"MCP:\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n"
             f"Connectors: {self.connectors.summary()}\n"
             f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
             f"Godmode: {cfg.skills.command.godmode}\n"
@@ -1201,6 +1426,8 @@ class UlyssesTextualApp(App):
             if not self.orchestrator.sync_command_policy_from_config(force=True):
                 raise RuntimeError("command policy synchronization failed")
             loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
+            if self.orchestrator.mcp:
+                self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp)
             self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
         except Exception as exc:
             self._write_error(f"Config reload failed: {exc}")
@@ -1267,6 +1494,67 @@ class UlyssesTextualApp(App):
 
     def action_connector_setup(self) -> None:
         self.push_screen(ConnectorSelectionScreen(), self._open_connector_setup)
+
+    def action_mcp_setup(self) -> None:
+        self.push_screen(MCPSelectionScreen(self.orchestrator.config.mcp.servers), self._open_mcp_setup)
+
+    def _open_mcp_setup(self, server_id: str | None) -> None:
+        if server_id is None:
+            self._write_system("MCP setup cancelled.")
+            return
+        server = next((item for item in self.orchestrator.config.mcp.servers if item.id == server_id), None)
+        self.push_screen(MCPSetupScreen(server), self._finish_mcp_setup)
+
+    def _finish_mcp_setup(self, setup: MCPServerSetup | None) -> None:
+        if setup is None:
+            self._write_system("MCP setup cancelled.")
+            return
+        self._start_waiting()
+        Thread(target=self._mcp_setup_in_thread, args=(setup,), daemon=True).start()
+
+    def _mcp_setup_in_thread(self, setup: MCPServerSetup) -> None:
+        server = setup.server_config()
+        previous_token = os.environ.get(server.bearer_token_env) if server.bearer_token_env else None
+        if setup.bearer_token and server.bearer_token_env:
+            os.environ[server.bearer_token_env] = setup.bearer_token.strip()
+        try:
+            tools = (
+                SDKMCPClient(self.orchestrator.config.mcp.allowed_stdio_commands).discover(server)
+                if server.enabled
+                else []
+            )
+            apply_mcp_server_setup(self.orchestrator.config, self.orchestrator.config_path, setup)
+            load_env_file(env_path_for_config(self.orchestrator.config_path))
+            self.orchestrator.config = load_config(self.orchestrator.config_path)
+            self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp, start=False)
+            if server.enabled:
+                self.orchestrator.mcp.discover_now(server.id)
+        except Exception as exc:
+            if server.bearer_token_env:
+                if previous_token is None:
+                    os.environ.pop(server.bearer_token_env, None)
+                else:
+                    os.environ[server.bearer_token_env] = previous_token
+            self.call_from_thread(self._finish_mcp_setup_error, str(exc))
+            return
+        names = [str(tool.get("name") or "") for tool in tools]
+        self.call_from_thread(self._activate_mcp_setup, server.id, names)
+
+    def _activate_mcp_setup(self, server_id: str, tools: list[str]) -> None:
+        self._stop_waiting()
+        status = self.orchestrator.mcp.status(server_id)
+        self._write_system(
+            f"MCP server saved: {server_id}\n"
+            f"Status: {status.state}\n"
+            f"Advertised tools: {', '.join(tools) or 'none'}\n"
+            f"Allowed tools registered: {status.tool_count}"
+        )
+        self._refresh_status()
+
+    def _finish_mcp_setup_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"MCP server validation failed; configuration was not saved: {error}")
+        self._refresh_status()
 
     def _open_connector_setup(self, connector_id: str | None) -> None:
         if connector_id is None:
@@ -1352,7 +1640,9 @@ class UlyssesTextualApp(App):
                 token = parts[1].strip() if len(parts) == 2 else None
                 response = self.orchestrator.confirm_pending_tool(token)
         elif lowered == "/cancel":
-            response = "Pending command cancelled." if self.orchestrator.cancel_pending_tool() else "No command is pending."
+            response = (
+                "Pending command cancelled." if self.orchestrator.cancel_pending_tool() else "No command is pending."
+            )
         else:
             response = self.orchestrator.handle_text(text)
         try:
@@ -1364,7 +1654,16 @@ class UlyssesTextualApp(App):
 
     def on_unmount(self) -> None:
         self.connectors.stop_all()
+        if self.orchestrator.mcp:
+            self.orchestrator.mcp.stop()
         _stop_system_clipboard_owner()
+
+    def _mcp_event_from_worker(self, message: str) -> None:
+        try:
+            self.call_from_thread(self._write_system, message)
+            self.call_from_thread(self._refresh_status)
+        except RuntimeError:
+            pass
 
     def _finish_provider_setup(self, setup: ProviderSetup | None) -> None:
         if setup is None:
@@ -1387,7 +1686,9 @@ class UlyssesTextualApp(App):
 
     def _show_openai_callback(self, login: OpenAIBrowserLogin, setup: ProviderSetup) -> None:
         self._stop_waiting()
-        self.push_screen(OpenAICallbackScreen(login.auth_url), lambda value: self._finish_openai_callback(value, login, setup))
+        self.push_screen(
+            OpenAICallbackScreen(login.auth_url), lambda value: self._finish_openai_callback(value, login, setup)
+        )
 
     def _finish_openai_callback(
         self, callback_url: str | None, login: OpenAIBrowserLogin, setup: ProviderSetup
@@ -1399,9 +1700,7 @@ class UlyssesTextualApp(App):
         self._start_waiting()
         Thread(target=self._complete_openai_login, args=(callback_url, login, setup), daemon=True).start()
 
-    def _complete_openai_login(
-        self, callback_url: str, login: OpenAIBrowserLogin, setup: ProviderSetup
-    ) -> None:
+    def _complete_openai_login(self, callback_url: str, login: OpenAIBrowserLogin, setup: ProviderSetup) -> None:
         try:
             model = login.complete(callback_url)
         except OpenAIBrowserLoginError as exc:
@@ -1640,6 +1939,7 @@ class UlyssesTextualApp(App):
             f"Voice\n{voice}\n\n"
             f"Active skill\n{active_skill}\n\n"
             f"Sub-agents\n{self.orchestrator.subagents.status_detail() if self.orchestrator.subagents else 'disabled'}\n\n"
+            f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
             f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Theme\n{self.theme_name}"
@@ -1759,15 +2059,21 @@ class UlyssesTextualApp(App):
 
     def _write_assistant(self, text: str) -> None:
         self.last_assistant_text = text
-        self.query_one("#transcript", TranscriptLog).write(f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(
+            f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]\n{text}\n"
+        )
         self._append_plain("Ulysses", text)
 
     def _write_tool(self, text: str) -> None:
-        self.query_one("#transcript", TranscriptLog).write(f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(
+            f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]\n{text}\n"
+        )
         self._append_plain("tool", text)
 
     def _write_system(self, text: str) -> None:
-        self.query_one("#transcript", TranscriptLog).write(f"[bold green]system[/bold green] [dim]{_time()}[/dim]\n{text}\n")
+        self.query_one("#transcript", TranscriptLog).write(
+            f"[bold green]system[/bold green] [dim]{_time()}[/dim]\n{text}\n"
+        )
         self._append_plain("system", text)
 
     def _write_error(self, text: str) -> None:
@@ -1825,12 +2131,7 @@ def _time() -> str:
 
 def _boot_progress(message: str, completed: int, frame: str) -> str:
     labels = ("Brain", "Memory", "Skills", "Prompt", "Voice")
-    final_lines = {
-        label: line
-        for line in message.splitlines()
-        for label in labels
-        if line.startswith(f"{label}:")
-    }
+    final_lines = {label: line for line in message.splitlines() for label in labels if line.startswith(f"{label}:")}
     heading = message.splitlines()[0] if message else "Ulysses Cyber Sentinel initializing"
     lines = [heading, "", "System readiness checks"]
     for index, label in enumerate(labels):
@@ -1955,11 +2256,19 @@ def _active_command_policy(orchestrator):
         return None
 
 
+def _csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def _run_system_command_capture(orchestrator, command: str) -> tuple[str, bool]:
     orchestrator.sync_command_policy_from_config(force=True)
     result = orchestrator._run_skill_result("system_command", {"command": command})
     if result.requires_confirmation:
-        orchestrator.pending_tool = {"name": "system_command", "arguments": {"command": command}, "token": result.confirmation_token}
+        orchestrator.pending_tool = {
+            "name": "system_command",
+            "arguments": {"command": command},
+            "token": result.confirmation_token,
+        }
         return result.confirmation_prompt or result.content, False
     orchestrator._record_tool_result(
         "system_command",

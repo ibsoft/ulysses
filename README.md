@@ -183,6 +183,38 @@ The installer resolves Codex with `command -v` and records the discovered execut
 file. At runtime Ulysses uses that discovered value or resolves `codex` from the current `PATH`; no installation path is
 embedded in the application.
 
+## MCP Servers
+
+Ulysses can expose tools from Model Context Protocol servers through an optional, policy-controlled adapter. MCP is
+disabled by default and does not change built-in skills, command policy, connectors, or sub-agent isolation. Configure a
+server from the local console:
+
+```text
+/setup mcp
+```
+
+The setup dialog supports local `stdio` servers and remote Streamable HTTP servers. It validates connectivity before
+saving, then discovers only the tools named in the server's explicit allowlist. Discovered tools use collision-resistant
+names such as `mcp__asset_inventory__search`. `F6` lists them with normal skills; the sidebar, `F5`, and `/mcp servers`
+show connection state and tool counts.
+
+Useful commands:
+
+```text
+/mcp servers
+/mcp tools
+/mcp reconnect <server_id>
+```
+
+For `stdio`, the executable basename must also appear in `mcp.allowed_stdio_commands`. For Streamable HTTP, Ulysses
+requires HTTPS except for loopback development endpoints. Bearer tokens are entered in a masked field and stored only in
+`~/.config/ulysses/env`; YAML stores the environment-variable name. Tool descriptions and results are treated as
+untrusted external data. Per-server confirmation policy, risk level, timeouts, catalog limits, output caps, and artifacts
+remain enforced. One unavailable server is isolated and does not stop Ulysses or other MCP servers.
+
+Sub-agents do not inherit MCP tools. Ulysses remains the supervisor and may use MCP output when composing the final answer.
+See [the full MCP configuration and test guide](docs/ULYSSES.md#mcp-servers).
+
 ## Connectors
 
 Open connector configuration with:
@@ -335,6 +367,7 @@ Important sections:
 - `memory`: SQLite, FAISS, metadata paths, and retrieval settings.
 - `context`: automatic session consolidation.
 - `skills`: internet search and local command policy.
+- `mcp`: optional external tool servers, transport policy, allowlists, limits, and artifact storage.
 - `logging`: structured runtime and security audit logs.
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.
@@ -437,6 +470,10 @@ Common commands inside the TUI:
 /select off
 /setup providers
 /setup connectors
+/setup mcp
+/mcp servers
+/mcp tools
+/mcp reconnect <server_id>
 /autonomous on
 /autonomous off
 /export
@@ -472,6 +509,8 @@ Ulysses treats local command execution as a privileged capability.
 - Sudo passwords are accepted only through a masked TUI dialog and are excluded from normal chat, model-visible tool schemas, session metadata, and audit arguments.
 - Secret-bearing metadata keys are recursively redacted before persistence.
 - API keys and provider tokens are expected to live in environment variables or provider authentication storage, not in YAML.
+- MCP is disabled by default; each server and tool must be enabled explicitly, and remote HTTP endpoints require TLS except on loopback.
+- MCP metadata and results are untrusted input. Server tool catalogs and returned output are capped before entering model context.
 
 `skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
 

@@ -14,6 +14,11 @@ class PasswordHarness(App):
         self.push_screen(self.password_screen)
 
 
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
 @pytest.mark.anyio
 async def test_sudo_dialog_uses_masked_input():
     app = PasswordHarness()

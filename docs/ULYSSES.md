@@ -342,6 +342,95 @@ OAuth. OpenAI documents Sign in with ChatGPT as a Codex-managed login that links
 creates an API key automatically. See [Codex CLI and Sign in with ChatGPT](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)
 and the [Codex app-server authentication protocol](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md).
 
+## MCP Servers
+
+MCP support is an optional client adapter for external tools. It uses the stable 1.x official Python SDK and supports the
+standard `stdio` and Streamable HTTP transports. It is disabled by default, and enabling it does not bypass the existing
+skill registry, confirmation flow, command policy, audit logging, output limits, or TUI lifecycle.
+
+### Configure A Server
+
+Run `/setup mcp`. Select an existing server to edit or choose **Add server**. The setup form accepts:
+
+- A stable server ID used in exported tool names.
+- `stdio` command plus a JSON argument array, or a Streamable HTTP URL.
+- Environment-variable names that may be passed to a local process.
+- An optional bearer-token environment-variable name and masked token value for HTTP.
+- An exact comma-separated tool allowlist; `*` explicitly permits the bounded discovered catalog.
+- Risk level, timeout, enabled state, and whether every invocation requires confirmation.
+
+Setup performs a live initialization and tool-discovery check before writing configuration. Tokens are written to the
+adjacent protected `env` file with mode `0600`; they are never written to YAML. Leaving the token field blank preserves an
+existing value. Configuration reload replaces prior dynamic registrations cleanly.
+
+Example non-secret configuration:
+
+```yaml
+mcp:
+  enabled: true
+  allowed_stdio_commands: [python, python3, uv, uvx, node, npx, docker]
+  artifacts_dir: var/ulysses/mcp/artifacts
+  max_output_chars: 50000
+  max_tools_per_server: 50
+  max_description_chars: 500
+  servers:
+    - id: local_inventory
+      enabled: true
+      transport: stdio
+      command: python3
+      args: [/opt/company-mcp/server.py]
+      environment_variables: []
+      tool_allowlist: [search_assets, inspect_asset]
+      risk_level: medium
+      require_confirmation: true
+      timeout_seconds: 60
+    - id: ticketing
+      enabled: true
+      transport: streamable_http
+      url: https://mcp.example.com/mcp
+      bearer_token_env: TICKETING_MCP_TOKEN
+      tool_allowlist: [search_tickets]
+      risk_level: high
+      require_confirmation: true
+      timeout_seconds: 60
+```
+
+Discovered names are normalized and namespaced as `mcp__<server_id>__<tool_name>`, preventing collisions with built-in,
+external, and other servers' tools. Use `F6` or `/mcp tools` to inspect registered names. Use `/mcp servers`, `F5`, or the
+sidebar for state and counts; `/mcp reconnect <server_id>` repeats discovery after a server change.
+
+### MCP Security Boundary
+
+- `stdio` executables require a second allowlist in `mcp.allowed_stdio_commands`; arguments are arrays and never pass through a shell.
+- Only selected environment variables are forwarded. Ulysses adds a minimal runtime environment required to launch the process.
+- Streamable HTTP requires HTTPS, except for `localhost`, `127.0.0.1`, and `::1`; URL credentials and fragments are rejected.
+- Remote tool descriptions, schemas, text, structured content, and resources are untrusted input, not agent instructions.
+- Tool catalogs and descriptions are bounded, returned text is capped, and binary content is saved under the MCP artifact directory.
+- Confirmation and typed high-risk confirmation are applied by Ulysses regardless of server-provided annotations.
+- A failed server becomes offline or degraded without preventing other servers and built-in skills from operating.
+- Sub-agents receive only their confined workspace tools and do not inherit MCP capabilities.
+
+MCP currently exposes server tools. Server resources, prompts, roots, sampling requests, and OAuth discovery are not
+enabled by this adapter. For authenticated HTTP servers, provision a bearer token through the protected environment file.
+
+### MCP Smoke Test
+
+1. Start a trusted local MCP server whose launcher is listed in `mcp.allowed_stdio_commands`.
+2. Run `/setup mcp`, enter an exact tool allowlist, and save after validation succeeds.
+3. Run `/mcp servers` and confirm the server is `online`; run `/mcp tools` and verify namespaced tools only.
+4. Ask Ulysses to perform a harmless operation exposed by that server and complete the confirmation prompt.
+5. Stop the server, run `/mcp reconnect <server_id>`, and verify Ulysses remains usable while that server reports offline.
+
+Development regression test:
+
+```bash
+.venv/bin/python -m pytest -q tests/agent/test_mcp.py
+```
+
+Protocol and transport background is available in the official
+[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) and
+[MCP security guidance](https://modelcontextprotocol.io/specification/latest/basic/security_best_practices).
+
 Run text-only:
 
 ```bash
@@ -398,7 +487,7 @@ independent of `/voice off` and `/mute`, which control spoken responses.
 
 ## Slash Commands
 
-`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
+`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/setup mcp`, `/mcp servers`, `/mcp tools`, `/mcp reconnect <server_id>`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
 
 Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
 
