@@ -741,7 +741,7 @@ Ulysses treats local command execution as a privileged capability.
 - MCP is disabled by default; each server and tool must be enabled explicitly, and remote HTTP endpoints require TLS except on loopback.
 - MCP metadata and results are untrusted input. Server tool catalogs and returned output are capped before entering model context.
 
-`skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
+Godmode is off by default. Setting `skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
 
 ## Privacy And Data
 

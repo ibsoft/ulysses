@@ -81,7 +81,7 @@ skills:
   internet_search_enabled: true
   command:
     enabled: true
-    godmode: true
+    godmode: false
     bypass_confirmation_for_allowed_commands: false
     require_confirmation: false
     require_typed_confirmation_for_high_risk: false
