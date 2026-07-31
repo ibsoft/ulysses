@@ -32,7 +32,8 @@ class UpdateManager:
     def __init__(self, config) -> None:
         self.config = config
         metadata = self._metadata()
-        self.status = UpdateStatus("unknown", latest_branch=str(metadata.get("source_branch") or ""))
+        self.installed_branch = str(metadata.get("source_branch") or "")
+        self.status = UpdateStatus("unknown", latest_branch=self.installed_branch)
 
     def _metadata(self) -> dict[str, str]:
         path = Path(self.config.metadata_path)

@@ -301,6 +301,10 @@ release branch and that an update is available, and the transcript displays one 
 The sidebar displays the version once, centered directly below the Ulysses logo. The remaining sidebar status shows only
 the update state so the version is not duplicated.
 
+The top TUI header displays the locally installed source branch, for example
+`Ulysses v_2.0.14 — local-first AI voice agent`. This remains the installed version even when GitHub reports that a newer
+release is available.
+
 Check manually from the command box:
 
 ```text

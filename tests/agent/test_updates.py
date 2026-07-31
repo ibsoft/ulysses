@@ -18,7 +18,9 @@ def _config(tmp_path):
 
 def test_update_check_reports_available_commit(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    config.metadata_path.write_text(json.dumps({"main_commit": "a" * 40}), encoding="utf-8")
+    config.metadata_path.write_text(
+        json.dumps({"main_commit": "a" * 40, "source_branch": "v_2.0.13"}), encoding="utf-8"
+    )
     monkeypatch.setattr(
         update_module.subprocess,
         "run",
@@ -29,8 +31,10 @@ def test_update_check_reports_available_commit(tmp_path, monkeypatch):
         ),
     )
 
-    status = UpdateManager(config).check()
+    manager = UpdateManager(config)
+    status = manager.check()
 
+    assert manager.installed_branch == "v_2.0.13"
     assert status.state == "available"
     assert status.installed_commit == "a" * 40
     assert status.latest_commit == "b" * 40

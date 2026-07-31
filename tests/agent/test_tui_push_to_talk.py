@@ -1,3 +1,4 @@
+import json
 import time
 
 import pytest
@@ -173,6 +174,26 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
         assert "Version\n" not in status
         assert "Latest branch\n" not in status
         assert status.count("v_2.0.13") == 0
+
+
+def test_top_header_includes_locally_installed_version(tmp_path):
+    config = UlyssesConfig()
+    config.memory.sqlite_path = tmp_path / "sessions.sqlite3"
+    config.memory.faiss_path = tmp_path / "memory.faiss"
+    config.memory.metadata_path = tmp_path / "memory.jsonl"
+    config.updates.metadata_path = tmp_path / ".ulysses-build.json"
+    config.updates.metadata_path.write_text(json.dumps({"source_branch": "v_2.0.14"}), encoding="utf-8")
+    sessions = SessionStore(config.memory.sqlite_path)
+    memory = FaissMemoryStore(
+        config.memory.faiss_path,
+        config.memory.metadata_path,
+        LocalHashEmbeddingProvider(64),
+    )
+
+    app = UlyssesTextualApp(AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry()))
+
+    assert app.title == "Ulysses v_2.0.14"
+    assert app.sub_title == "local-first AI voice agent"
 
 
 def test_textual_tui_escape_stops_voice_with_priority():
