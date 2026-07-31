@@ -178,6 +178,16 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
         assert status.count("v_2.0.15") == 0
         assert app.title == "Ulysses v_2.0.15 (update)"
 
+        app.action_status()
+        report = app.transcript_plain[-1]
+        assert "◆  ULYSSES SYSTEM STATUS" in report
+        assert "CORE" in report
+        assert "CAPABILITIES" in report
+        assert "SECURITY" in report
+        assert "Connector:" in report
+        assert "Delegated jobs" not in report
+        assert "Config path" not in report
+
 
 def test_top_header_includes_locally_installed_version(tmp_path):
     config = UlyssesConfig()

@@ -7,6 +7,9 @@ build/
 dist/
 *.egg-info/
 
+# Local runtime state may contain sessions, prompts, evidence, and credentials.
+/var/
+
 # Sirina bundles small metadata files, not large model binaries.
 models/**/*.onnx
 models/**/*.bin
