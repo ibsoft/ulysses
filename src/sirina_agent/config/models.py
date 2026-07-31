@@ -110,6 +110,17 @@ class TUIConfig(BaseModel):
     theme: Literal["ulysses_dark", "ulysses_light", "terminal"] = "ulysses_dark"
 
 
+class UpdateConfig(BaseModel):
+    enabled: bool = True
+    check_on_startup: bool = True
+    repository_url: str = "https://github.com/ibsoft/ulysses.git"
+    branch: str = "main"
+    metadata_path: Path = Path(".ulysses-build.json")
+    updater_path: Path = Path("scripts/update-ulysses-linux")
+    timeout_seconds: float = 10.0
+    install_timeout_seconds: float = 1800.0
+
+
 class TelegramConnectorConfig(BaseModel):
     enabled: bool = False
     token_env: str = "TELEGRAM_BOT_TOKEN"
@@ -323,6 +334,7 @@ class UlyssesConfig(BaseModel):
     skills: SkillConfig = Field(default_factory=SkillConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     tui: TUIConfig = Field(default_factory=TUIConfig)
+    updates: UpdateConfig = Field(default_factory=UpdateConfig)
     connectors: ConnectorConfig = Field(default_factory=ConnectorConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)

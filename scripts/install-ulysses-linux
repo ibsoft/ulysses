@@ -26,6 +26,13 @@ CONFIG_HOME="${HOME}/.config/ulysses"
 BIN_HOME="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
+SOURCE_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+SOURCE_BRANCH="$(git -C "${PROJECT_ROOT}" branch --show-current 2>/dev/null || true)"
+SOURCE_MAIN_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
+SOURCE_REPOSITORY_URL="$(git -C "${PROJECT_ROOT}" remote get-url origin 2>/dev/null || true)"
+if [[ -z "${SOURCE_MAIN_COMMIT}" ]]; then
+  SOURCE_MAIN_COMMIT="${SOURCE_COMMIT}"
+fi
 if [[ -z "${PYTHON_BIN:-}" ]]; then
   if command -v python3.11 >/dev/null 2>&1; then
     PYTHON_BIN="python3.11"
@@ -310,6 +317,22 @@ write_configuration() {
   fi
 }
 
+write_build_metadata() {
+  SOURCE_COMMIT="${SOURCE_COMMIT}" SOURCE_BRANCH="${SOURCE_BRANCH}" SOURCE_MAIN_COMMIT="${SOURCE_MAIN_COMMIT}" \
+    SOURCE_REPOSITORY_URL="${SOURCE_REPOSITORY_URL}" "${PYTHON_BIN}" -c '
+import json, os
+from datetime import datetime, timezone
+from pathlib import Path
+Path("'"${APP_SOURCE}"'/.ulysses-build.json").write_text(json.dumps({
+    "source_commit": os.environ.get("SOURCE_COMMIT", ""),
+    "source_branch": os.environ.get("SOURCE_BRANCH", ""),
+    "main_commit": os.environ.get("SOURCE_MAIN_COMMIT", ""),
+    "repository_url": os.environ.get("SOURCE_REPOSITORY_URL", ""),
+    "installed_at": datetime.now(timezone.utc).isoformat(),
+}, indent=2) + "\n", encoding="utf-8")
+'
+}
+
 create_launcher() {
   cat >"${BIN_HOME}/ulysses" <<EOF
 #!/usr/bin/env bash
@@ -331,6 +354,7 @@ verify_installation() {
 
 run_animated "Applying configuration and secure defaults" write_configuration
 run_animated "Creating the Ulysses command launcher" create_launcher
+write_build_metadata
 run_animated "Verifying installation integrity" verify_installation
 
 cat <<EOF

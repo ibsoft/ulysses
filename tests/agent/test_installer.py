@@ -89,3 +89,12 @@ def test_installer_reports_optional_native_clipboard_dependencies():
 
     assert "Ctrl+V requires xclip or xsel on X11" in script
     assert "Ctrl+V requires wl-clipboard on Wayland" in script
+
+
+def test_installer_records_source_and_main_commit_metadata():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'SOURCE_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD' in script
+    assert "SOURCE_MAIN_COMMIT" in script
+    assert ".ulysses-build.json" in script
+    assert "write_build_metadata" in script

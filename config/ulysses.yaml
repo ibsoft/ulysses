@@ -167,6 +167,15 @@ logging:
   directory: var/ulysses/logs
 tui:
   theme: ulysses_dark
+updates:
+  enabled: true
+  check_on_startup: true
+  repository_url: https://github.com/ibsoft/ulysses.git
+  branch: main
+  metadata_path: .ulysses-build.json
+  updater_path: scripts/update-ulysses-linux
+  timeout_seconds: 10
+  install_timeout_seconds: 1800
 prompt:
   personality: >-
     Pragmatic, calm, technically rigorous, concise, and security-aware.

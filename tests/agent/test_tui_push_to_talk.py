@@ -4,6 +4,7 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.events import Paste
+from textual.widgets import Label, Static
 
 from sirina_agent.config.models import UlyssesConfig
 from sirina_agent.core.orchestrator import AgentOrchestrator
@@ -19,6 +20,7 @@ from sirina_agent.tui.textual_app import (
     _system_clipboard_backend,
     _system_clipboard_text,
 )
+from sirina_agent.updates import UpdateStatus
 
 
 @pytest.fixture
@@ -146,6 +148,31 @@ async def test_sidebar_scrolls_without_hiding_lower_sections(tmp_path):
         sidebar.scroll_end(animate=False)
         await pilot.pause()
         assert sidebar.scroll_y > 0
+
+
+@pytest.mark.anyio
+async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
+    config = UlyssesConfig()
+    config.memory.sqlite_path = tmp_path / "sessions.sqlite3"
+    config.memory.faiss_path = tmp_path / "memory.faiss"
+    config.memory.metadata_path = tmp_path / "memory.jsonl"
+    sessions = SessionStore(config.memory.sqlite_path)
+    memory = FaissMemoryStore(
+        config.memory.faiss_path,
+        config.memory.metadata_path,
+        LocalHashEmbeddingProvider(64),
+    )
+    app = UlyssesTextualApp(AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry()))
+    app.updates.status = UpdateStatus("current", latest_branch="v_2.0.13")
+
+    async with app.run_test(size=(80, 30)):
+        brand = str(app.query_one("#brand", Label).render())
+        status = str(app.query_one("#status", Static).render())
+
+        assert brand == "Ulysses v_2.0.13"
+        assert "Version\n" not in status
+        assert "Latest branch\n" not in status
+        assert status.count("v_2.0.13") == 0
 
 
 def test_textual_tui_escape_stops_voice_with_priority():

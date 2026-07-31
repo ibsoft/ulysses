@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPOSITORY_URL="${1:?repository URL is required}"
+BRANCH="${2:-main}"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ulysses-update.XXXXXX")"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
+git clone --quiet --depth 1 --branch "${BRANCH}" "${REPOSITORY_URL}" "${WORK_DIR}/source"
+"${WORK_DIR}/source/scripts/install-ulysses-linux" --preserve-config

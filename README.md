@@ -140,57 +140,226 @@ For a development checkout, run the focused automated tests with:
 
 See [the extended sub-agent test guide](docs/ULYSSES.md#testing-sub-agents) for filesystem and isolation checks.
 
-## Requirements
+## Installation
 
-- Linux
-- Python 3.11 or newer
-- PortAudio and libsndfile for local audio
-- An OpenAI API key or another configured OpenAI-compatible provider
-- Optional: CUDA ONNX Runtime for accelerated local speech inference
+These instructions install Ulysses for the current Linux user from
+[github.com/ibsoft/ulysses](https://github.com/ibsoft/ulysses). The installer creates an isolated Python environment under
+`~/.ulysses`, installs the application, downloads required voice models, and creates the `~/.local/bin/ulysses` launcher.
+It does not require running Ulysses itself as root.
 
-On Ubuntu/Debian:
+### 1. Install System Prerequisites
+
+Ulysses requires Linux and Python 3.11 or newer. On Kali Linux, Ubuntu, Debian, or a derivative, run:
 
 ```bash
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv portaudio19-dev libsndfile1 ripgrep xclip
+sudo apt install -y git curl python3 python3-venv python3-dev build-essential \
+  portaudio19-dev libsndfile1 ripgrep xclip
 ```
 
-## Install
-
-For a current-user install:
+Use `wl-clipboard` instead of `xclip` for a Wayland-only desktop:
 
 ```bash
-scripts/install-ulysses-linux
+sudo apt install -y wl-clipboard
 ```
 
-Running the installer again upgrades the installed application while preserving runtime projects, reports, sessions,
-memory, logs, and downloaded models. The active configuration is refreshed from `config/ulysses.yaml`; the previous
-file is retained as a timestamped backup. Use `scripts/install-ulysses-linux --preserve-config` to keep the active
-configuration unchanged during an upgrade.
-
-For a fast development deployment that only synchronizes source and configuration into the existing installation:
+Confirm the Python version before continuing:
 
 ```bash
-scripts/install-ulysses-linux --sync-only
+python3 --version
 ```
 
-The installer creates:
+### 2. Clone The Repository
+
+```bash
+git clone https://github.com/ibsoft/ulysses.git
+cd ulysses
+```
+
+### 3. Run The Installer
+
+```bash
+./scripts/install-ulysses-linux
+```
+
+The first installation can take several minutes because Python packages and local Sirina speech models are prepared.
+When it completes, the installer prints the application, configuration, model, environment, and launcher paths.
+
+The current-user installation contains:
 
 ```text
-~/.ulysses/app
-~/.ulysses/app/models
-~/.ulysses/venv
-~/.config/ulysses/ulysses.yaml
-~/.config/ulysses/env
-~/.local/bin/ulysses
+~/.ulysses/app/                         Installed application source
+~/.ulysses/app/models/                  Local speech models
+~/.ulysses/venv/                        Isolated Python environment
+~/.config/ulysses/ulysses.yaml          Active configuration
+~/.config/ulysses/env                   Provider secrets; mode 0600
+~/.local/bin/ulysses                    Command launcher
 ```
 
-Sirina model files are downloaded during install when they are missing or invalid. Re-running the installer preserves runtime state under `~/.ulysses/app/var/ulysses`, including assessment projects, reports, sessions, FAISS memory, metadata, and logs.
+### 4. Download And Verify All Sirina Models
 
-Set your API key in `~/.config/ulysses/env`:
+The installer automatically downloads the complete Sirina `all` model group. This includes the ASR/STT assets used for
+speech recognition and the TTS assets used for Kokoro voices. To explicitly download all models again, or resume after an
+interrupted model download, run this single command:
 
 ```bash
-OPENAI_API_KEY=your_api_key_here
+~/.ulysses/venv/bin/sirina --model-dir "$HOME/.ulysses/app/models" download --group all
+```
+
+Verify every downloaded model and checksum:
+
+```bash
+~/.ulysses/venv/bin/sirina --model-dir "$HOME/.ulysses/app/models" check-models --group all
+```
+
+Both commands are safe to run again. Existing valid model files are reused, while missing or invalid files are downloaded
+or reported. Use `--group asr` or `--group tts` only when you intentionally want one model family instead of the complete
+installation.
+
+### 5. Add The Launcher To PATH
+
+Most Linux desktops already include `~/.local/bin`. If `command -v ulysses` returns nothing, run:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add the same line to `~/.bashrc`, `~/.zshrc`, or the appropriate shell profile to make it permanent, then open a new
+terminal or reload that profile.
+
+### 6. Start Ulysses
+
+```bash
+ulysses
+```
+
+The installed launcher automatically loads `~/.config/ulysses/env`, selects the active configuration at
+`~/.config/ulysses/ulysses.yaml`, and uses the installed model directory. Do not run the TUI with `sudo`.
+
+If audio hardware is unavailable or not configured yet, start in text-only mode:
+
+```bash
+ulysses --text-only
+```
+
+### 7. Complete Initial Provider Setup
+
+From the Ulysses command box, open provider setup:
+
+```text
+/setup providers
+```
+
+You can also press `F7`. Select one provider:
+
+- **OpenAI API key:** enter the API key in the masked field. Ulysses stores it only in
+  `~/.config/ulysses/env` and activates the provider immediately.
+- **OpenAI browser:** requires the Codex CLI. Ulysses displays the real login URL; open it manually, sign in, and paste
+  the complete localhost return URL into the masked callback field.
+- **Kimi:** enter the Moonshot API key in the masked field.
+- **Ollama:** use a running local Ollama server; no real API key is required.
+
+Do not paste API keys, OAuth return URLs, sudo passwords, or other secrets into normal chat.
+
+### 8. Verify The Installation
+
+Inside Ulysses:
+
+1. Press `F5` or enter `/status` and confirm the provider, memory, skills, and voice states.
+2. Press `F6` or enter `/skills` and confirm the built-in skills are registered.
+3. Send `Reply with: Ulysses is ready.` to verify the configured model.
+4. Press `Ctrl+V` in the composer to verify clipboard paste. Use `Ctrl+Shift+V` as the terminal-native fallback.
+5. Press `F4` to test push-to-talk after microphone access and speech models are available.
+
+### Upgrade An Existing Installation
+
+From the cloned repository:
+
+```bash
+git pull --ff-only
+./scripts/install-ulysses-linux --preserve-config
+```
+
+The upgrade preserves runtime projects, reports, sessions, memory, generated skills, connector state, logs, and downloaded
+models. `--preserve-config` retains the active configuration. Without it, the installer refreshes the active configuration
+from the repository and keeps the previous file as a timestamped backup.
+
+Developers can publish source changes into an existing installation without rebuilding its environment or models:
+
+```bash
+./scripts/install-ulysses-linux --sync-only --preserve-config
+```
+
+### Check For Updates From GitHub Main
+
+Each installation records the source branch and Git commit from the repository's `main` branch. On startup, Ulysses
+performs a bounded background `git ls-remote` check against the configured repository. It resolves the highest
+version-named branch and shows it as the latest release branch in the TUI. Update availability is determined only by
+comparing the installed `main` commit with remote `main`. If `main` has advanced, the sidebar and `/status` show the latest
+release branch and that an update is available, and the transcript displays one concise notification.
+
+The sidebar displays the version once, centered directly below the Ulysses logo. The remaining sidebar status shows only
+the update state so the version is not duplicated.
+
+Check manually from the command box:
+
+```text
+/update
+```
+
+Install the latest merged `main` branch:
+
+```text
+/update install
+```
+
+The updater clones `main` into a temporary directory and runs the new version's installer with `--preserve-config`.
+It does not merge into the installed application or modify the active `~/.config/ulysses/ulysses.yaml`. Assessment
+projects, reports, sessions, memory, generated skills, connector state, logs, secrets, and downloaded models are
+preserved. Restart Ulysses after a successful update.
+
+Update behavior is configurable:
+
+```yaml
+updates:
+  enabled: true
+  check_on_startup: true
+  repository_url: https://github.com/ibsoft/ulysses.git
+  branch: main
+  metadata_path: .ulysses-build.json
+  updater_path: scripts/update-ulysses-linux
+  timeout_seconds: 10
+  install_timeout_seconds: 1800
+```
+
+#### Test The Update Workflow
+
+1. Restart Ulysses:
+
+   ```bash
+   ulysses
+   ```
+
+2. Confirm that `Ulysses <version-branch>` appears once, centered directly below the logo. The same version must not be
+   repeated in the persistent sidebar status.
+3. Enter `/update`. An up-to-date installation reports the latest version branch and abbreviated `main` commit. A newer
+   remote `main` reports that an update is available and instructs you to run `/update install`.
+4. Enter `/status` and confirm that the detailed output contains `Latest branch` and `Update` fields.
+5. Before testing the first available update, record the active configuration checksum in another terminal:
+
+   ```bash
+   sha256sum "$HOME/.config/ulysses/ulysses.yaml"
+   ```
+
+6. Enter `/update install` only when an update is available. Wait for completion, restart Ulysses, and run the checksum
+   command again. The checksum must be unchanged because the updater always uses `--preserve-config`.
+7. Confirm that existing projects, reports, sessions, generated skills, connector verification, and downloaded models are
+   still present after restart.
+
+Developers can run the focused update and sidebar tests from the repository checkout:
+
+```bash
+PYTHONPATH=src .venv/bin/pytest -q tests/agent/test_updates.py tests/agent/test_tui_push_to_talk.py
 ```
 
 ## Provider Setup
@@ -372,23 +541,22 @@ Large `.onnx` and `.bin` files are intentionally not tracked by git.
 
 ## Run
 
-Run Ulysses with the default local config:
+Run the installed application:
 
 ```bash
-ulysses --config config/ulysses.yaml
+ulysses
 ```
 
-Run text-only with the mock provider:
+Run without microphone, STT, or TTS:
+
+```bash
+ulysses --text-only
+```
+
+For development, run text-only with the mock provider and checkout configuration:
 
 ```bash
 ULYSSES__LLM__PROVIDER=mock ulysses --config config/ulysses.yaml --text-only
-```
-
-Run with OpenAI:
-
-```bash
-export OPENAI_API_KEY=your_api_key_here
-ulysses --config config/ulysses.yaml
 ```
 
 Provider setup is available inside the TUI with `F7` or `/setup providers`. It can save and activate:
@@ -506,6 +674,8 @@ Common commands inside the TUI:
 /config
 /status
 /reload
+/update
+/update install
 /voice on
 /voice off
 /mute
