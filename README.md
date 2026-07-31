@@ -313,10 +313,11 @@ Install the latest merged `main` branch:
 /update install
 ```
 
-The updater clones `main` into a temporary directory and runs the new version's installer with `--preserve-config`.
-It does not merge into the installed application or modify the active `~/.config/ulysses/ulysses.yaml`. Assessment
-projects, reports, sessions, memory, generated skills, connector state, logs, secrets, and downloaded models are
-preserved. Restart Ulysses after a successful update.
+The updater first clones `main` into `~/.ulysses/update-stage` without changing the running application. Exit Ulysses and
+run `ulysses` again; the launcher applies the staged version with `--preserve-config` before the new process opens SQLite,
+memory, projects, or logs. It does not merge into the installed application or modify the active
+`~/.config/ulysses/ulysses.yaml`. Assessment projects, reports, sessions, memory, generated skills, connector state, logs,
+secrets, and downloaded models are preserved. `/update install` refuses to stage anything when remote `main` is current.
 
 Update behavior is configurable:
 
@@ -351,8 +352,9 @@ updates:
    sha256sum "$HOME/.config/ulysses/ulysses.yaml"
    ```
 
-6. Enter `/update install` only when an update is available. Wait for completion, restart Ulysses, and run the checksum
-   command again. The checksum must be unchanged because the updater always uses `--preserve-config`.
+6. Enter `/update install` only when an update is available. Wait until Ulysses reports that the update is staged, exit,
+   and run `ulysses` again. The launcher applies the staged update before opening runtime databases. Run the checksum
+   command again; it must be unchanged because the launcher always uses `--preserve-config`.
 7. Confirm that existing projects, reports, sessions, generated skills, connector verification, and downloaded models are
    still present after restart.
 

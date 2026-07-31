@@ -336,6 +336,18 @@ Path("'"${APP_SOURCE}"'/.ulysses-build.json").write_text(json.dumps({
 create_launcher() {
   cat >"${BIN_HOME}/ulysses" <<EOF
 #!/usr/bin/env bash
+set -euo pipefail
+UPDATE_STAGE="${APP_HOME}/update-stage"
+if [[ -f "\${UPDATE_STAGE}/ready" ]]; then
+  printf 'Applying staged Ulysses update with configuration preservation...\n'
+  if "\${UPDATE_STAGE}/source/scripts/install-ulysses-linux" --preserve-config; then
+    rm -rf "\${UPDATE_STAGE}"
+    printf 'Update applied. Starting Ulysses...\n'
+  else
+    printf 'Staged update failed. Existing installation and update stage were retained.\n' >&2
+    exit 1
+  fi
+fi
 set -a
 [[ -f "${CONFIG_HOME}/env" ]] && source "${CONFIG_HOME}/env"
 set +a

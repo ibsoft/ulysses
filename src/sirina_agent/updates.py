@@ -10,7 +10,7 @@ from typing import Literal
 
 @dataclass(frozen=True)
 class UpdateStatus:
-    state: Literal["available", "current", "unknown", "checking", "installing"]
+    state: Literal["available", "current", "unknown", "checking", "installing", "staged"]
     installed_commit: str = ""
     latest_commit: str = ""
     latest_branch: str = ""
@@ -23,7 +23,7 @@ class UpdateStatus:
         if self.state == "current":
             release = f" {self.latest_branch}" if self.latest_branch else ""
             return f"up to date{release} ({self.installed_commit[:8]})"
-        if self.state in {"checking", "installing"}:
+        if self.state in {"checking", "installing", "staged"}:
             return self.state
         return "unknown"
 
@@ -98,6 +98,10 @@ class UpdateManager:
         return self.status
 
     def install(self) -> str:
+        if self.status.state != "available":
+            checked = self.check()
+            if checked.state != "available":
+                return checked.error or f"No update was staged: {checked.summary()}."
         release_branch = self.status.latest_branch
         self.status = UpdateStatus("installing", latest_branch=release_branch)
         script = Path(self.config.updater_path)
@@ -123,8 +127,11 @@ class UpdateManager:
                 "unknown", latest_branch=release_branch, error=f"Update failed: {detail[-2000:]}"
             )
             return self.status.error
-        self.status = UpdateStatus("current", latest_branch=release_branch)
-        return "Update installed from main with the active configuration preserved. Restart Ulysses to use it."
+        self.status = UpdateStatus("staged", latest_branch=release_branch)
+        return (
+            "Update downloaded and staged safely. Exit Ulysses, then run `ulysses` again. "
+            "The launcher will apply the update with the active configuration preserved before opening any database."
+        )
 
 
 def _natural_version_key(value: str) -> tuple:

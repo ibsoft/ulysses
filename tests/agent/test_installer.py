@@ -1,6 +1,9 @@
 from pathlib import Path
+import os
+import subprocess
 
 INSTALLER = Path(__file__).parents[2] / "scripts" / "install-ulysses-linux"
+UPDATER = Path(__file__).parents[2] / "scripts" / "update-ulysses-linux"
 
 
 def test_upgrade_preserves_runtime_and_models():
@@ -98,3 +101,46 @@ def test_installer_records_source_and_main_commit_metadata():
     assert "SOURCE_MAIN_COMMIT" in script
     assert ".ulysses-build.json" in script
     assert "write_build_metadata" in script
+
+
+def test_launcher_applies_staged_update_before_starting_application():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'UPDATE_STAGE="${APP_HOME}/update-stage"' in script
+    assert r'"\${UPDATE_STAGE}/source/scripts/install-ulysses-linux" --preserve-config' in script
+    assert script.index("Applying staged Ulysses update") < script.index('exec "${APP_HOME}/venv/bin/ulysses"')
+
+
+def test_updater_stages_checkout_without_running_installer(tmp_path):
+    home = tmp_path / "home"
+    app_home = home / ".ulysses"
+    fake_bin = tmp_path / "bin"
+    app_home.mkdir(parents=True)
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "destination=\"${@: -1}\"\n"
+        "mkdir -p \"${destination}/scripts\"\n"
+        "printf '#!/usr/bin/env bash\\nexit 99\\n' >\"${destination}/scripts/install-ulysses-linux\"\n"
+        "chmod +x \"${destination}/scripts/install-ulysses-linux\"\n",
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [str(UPDATER), "https://example.test/ulysses.git", "main"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert (app_home / "update-stage/ready").is_file()
+    assert (app_home / "update-stage/source/scripts/install-ulysses-linux").is_file()

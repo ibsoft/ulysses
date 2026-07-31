@@ -380,10 +380,12 @@ commit with `refs/heads/main` from the configured GitHub repository. Ulysses ind
 version-named branch and displays it as the latest release branch in the sidebar and `/status`; update availability still
 tracks only `main`. The check is bounded, read-only, and does not modify the checkout.
 
-Use `/update` for a manual check. Use `/update install` to clone the configured branch into a temporary directory and run
-its installer with `--preserve-config`. This avoids merging into the live application and preserves the active config,
-runtime projects, reports, sessions, memory, generated skills, connectors, logs, secrets, and models. Restart Ulysses
-after installation completes.
+Use `/update` for a manual check. `/update install` refuses to proceed when remote `main` is current. When an update is
+available, it clones the configured branch into `~/.ulysses/update-stage` without modifying the running application.
+Exit and launch `ulysses` again; the launcher applies the staged installer with `--preserve-config` before opening SQLite
+or other runtime files. This avoids live-file replacement and preserves the active config, runtime projects, reports,
+sessions, memory, generated skills, connectors, logs, secrets, and models. A failed apply retains both the existing
+installation and staged checkout for diagnosis or retry.
 
 ```yaml
 updates:

@@ -66,7 +66,33 @@ def test_update_install_uses_configured_updater_and_preserves_configuration(tmp_
 
     monkeypatch.setattr(update_module.subprocess, "run", run)
 
-    message = UpdateManager(config).install()
+    manager = UpdateManager(config)
+    manager.status = update_module.UpdateStatus(
+        "available",
+        installed_commit="a" * 40,
+        latest_commit="b" * 40,
+        latest_branch="v_2.1.0",
+    )
+    message = manager.install()
 
     assert calls == [[str(config.updater_path), config.repository_url, "main"]]
     assert "configuration preserved" in message
+    assert manager.status.state == "staged"
+
+
+def test_update_install_refuses_when_main_is_current(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.metadata_path.write_text(json.dumps({"main_commit": "a" * 40}), encoding="utf-8")
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=f"{'a' * 40}\trefs/heads/main\n", stderr="")
+
+    monkeypatch.setattr(update_module.subprocess, "run", run)
+
+    message = UpdateManager(config).install()
+
+    assert "No update was staged" in message
+    assert len(calls) == 1
+    assert calls[0][:3] == ["git", "ls-remote", "--heads"]
