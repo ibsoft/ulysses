@@ -142,7 +142,7 @@ class TelegramConnector:
                         initialized = True
                     self.connected = True
                     announced_error = False
-                    self._emit(f"Telegram connector online as @{self.bot_username}.")
+                    self._emit("Telegram connector online.")
                 updates = self._api(
                     "getUpdates",
                     {

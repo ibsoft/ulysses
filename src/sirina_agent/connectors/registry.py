@@ -82,11 +82,8 @@ class ConnectorManager:
 
 
 def _format_status(status: ConnectorStatus) -> str:
-    if not status.configured:
-        state = "token missing"
-    else:
-        state = "online" if status.connected else "connecting"
-    return f"{status.label}: {state} / verified={status.authorized_count}"
+    state = "on" if status.configured else "off"
+    return f"{status.label}: {state}"
 
 
 def _telegram_factory(
