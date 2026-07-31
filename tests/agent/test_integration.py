@@ -117,9 +117,9 @@ class MalformedSearchThenAnswerProvider:
         self.calls += 1
         self.messages.append(messages)
         if self.calls == 1:
-            arguments = '{"queries": ["subdomains egt.gr" "subdomains bizcore.gr"]}'
+            arguments = '{"queries": ["subdomains example.com" "subdomains example.org"]}'
         elif self.calls == 2:
-            arguments = '{"queries": ["subdomains egt.gr", "subdomains bizcore.gr"], "limit": 5}'
+            arguments = '{"queries": ["subdomains example.com", "subdomains example.org"], "limit": 5}'
         else:
             return {"choices": [{"message": {"role": "assistant", "content": "Combined domain findings."}}]}
         return {
@@ -333,7 +333,7 @@ def test_orchestrator_asks_model_to_correct_malformed_tool_arguments(tmp_path):
     activities = []
     agent.set_activity_callback(activities.append)
 
-    answer = agent.handle_text("find subdomains for egt.gr and bizcore.gr")
+    answer = agent.handle_text("find subdomains for example.com and example.org")
 
     assert answer == "Combined domain findings."
     assert provider.calls == 3

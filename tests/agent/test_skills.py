@@ -75,17 +75,17 @@ def test_internet_search_groups_multiple_queries(monkeypatch):
     monkeypatch.setattr(search_module, "_search_duckduckgo_html", search)
 
     result = DuckDuckGoSearchSkill().run(
-        {"queries": ["security egt.gr", "security bizcore.gr"], "limit": 3},
+        {"queries": ["security example.com", "security example.org"], "limit": 3},
         {},
     )
 
     assert result.ok
-    assert "Search: security egt.gr" in result.content
-    assert "Search: security bizcore.gr" in result.content
-    assert result.data["queries"] == ["security egt.gr", "security bizcore.gr"]
+    assert "Search: security example.com" in result.content
+    assert "Search: security example.org" in result.content
+    assert result.data["queries"] == ["security example.com", "security example.org"]
     assert {item["query"] for item in result.data["results"]} == {
-        "security egt.gr",
-        "security bizcore.gr",
+        "security example.com",
+        "security example.org",
     }
 
 
@@ -101,14 +101,14 @@ def test_internet_search_expands_domain_discovery_queries(monkeypatch):
     monkeypatch.setattr(search_module, "_search_duckduckgo_html", search)
 
     DuckDuckGoSearchSkill().run(
-        {"query": "find subdomains and IP addresses of egt.gr and bizcore.gr"},
+        {"query": "find subdomains and IP addresses of example.com and example.org"},
         {},
     )
 
-    assert "site:egt.gr -www" in attempted
-    assert 'site:crt.sh "egt.gr"' in attempted
-    assert "site:bizcore.gr -www" in attempted
-    assert 'site:crt.sh "bizcore.gr"' in attempted
+    assert "site:example.com -www" in attempted
+    assert 'site:crt.sh "example.com"' in attempted
+    assert "site:example.org -www" in attempted
+    assert 'site:crt.sh "example.org"' in attempted
 
 
 def test_command_confirmation(tmp_path):
