@@ -12,21 +12,20 @@ def startup_brief(orchestrator, voice_io=None) -> str:
     skills_ok, skills_status = _skills_status(orchestrator)
     prompt_ok, prompt_status = _prompt_status(orchestrator)
     lines = [
-        f"{cfg.agent_name} Cyber Sentinel initializing",
-        f"{cfg.agent_name} Cyber Sentinel online.",
-        "VAPT / PenTest / Vulnerability Assessment console initialized.",
+        f"[bold cyan]◆  {cfg.agent_name.upper()} CYBER SENTINEL[/bold cyan]",
+        "[dim]VAPT  /  PENTEST  /  VULNERABILITY ASSESSMENT[/dim]",
         "",
     ]
-    lines.append(f"Brain: {llm_status}")
-    lines.append(f"Memory: {memory_status}")
-    lines.append(f"Skills: {skills_status}")
-    lines.append(f"Prompt: {prompt_status}")
-    lines.append(f"Voice: {_voice_status(voice_io)}")
+    lines.append(_readiness_line("Brain", llm_ok, llm_status))
+    lines.append(_readiness_line("Memory", memory_ok, memory_status))
+    lines.append(_readiness_line("Skills", skills_ok, skills_status))
+    lines.append(_readiness_line("Prompt", prompt_ok, prompt_status))
+    lines.append(_readiness_line("Voice", voice_io is not None, _voice_status(voice_io)))
     lines.append("")
     if llm_ok and memory_ok and skills_ok and prompt_ok:
-        lines.append("All systems ready and operational.")
+        lines.append("[bold green]●  OPERATIONAL[/bold green]  All core systems ready.")
     else:
-        lines.append("Core systems initialized. Review setup items above.")
+        lines.append("[bold yellow]!  ATTENTION[/bold yellow]  Review setup items above.")
     return "\n".join(lines)
 
 
@@ -54,24 +53,24 @@ def spoken_startup_brief(orchestrator, voice_io=None) -> str:
 def _llm_status(cfg) -> tuple[bool, str]:
     llm = cfg.llm
     if llm.provider == "mock":
-        return True, f"up ({llm.provider} / {llm.model})"
+        return True, f"configured ({llm.provider} / {llm.model})"
     if llm.provider == "ollama":
-        return True, f"up ({llm.provider} / {llm.model} at {llm.base_url})"
+        return True, f"configured ({llm.provider} / {llm.model})"
     if llm.provider in {"openai", "kimi"}:
         if os.getenv(llm.api_key_env):
-            return True, f"up ({llm.provider} / {llm.model})"
+            return True, f"configured ({llm.provider} / {llm.model})"
         return False, f"needs setup ({llm.api_key_env} missing)"
     if llm.provider == "openai_chatgpt":
         if not codex_chatgpt_authenticated():
             return False, "needs setup (OpenAI browser login)"
-        return True, f"up (openai / {llm.model})"
+        return True, f"authenticated (openai / {llm.model})"
     return False, "needs provider setup"
 
 
 def _memory_status(orchestrator) -> tuple[bool, str]:
     try:
         orchestrator.memory.search("__ulysses_boot_check__", top_k=1)
-        return True, f"up ({len(orchestrator.memory.items)} memories indexed)"
+        return True, f"verified ({len(orchestrator.memory.items)} memories indexed)"
     except Exception as exc:
         return False, f"needs attention ({exc})"
 
@@ -79,7 +78,11 @@ def _memory_status(orchestrator) -> tuple[bool, str]:
 def _skills_status(orchestrator) -> tuple[bool, str]:
     try:
         names = [skill.manifest.name for skill in orchestrator.skills.enabled()]
-        return (True, "up (" + ", ".join(names) + ")") if names else (False, "needs setup (no enabled skills)")
+        if not names:
+            return False, "needs setup (no enabled skills)"
+        preview = ", ".join(names[:3])
+        remaining = f", +{len(names) - 3} more" if len(names) > 3 else ""
+        return True, f"loaded ({len(names)} active: {preview}{remaining})"
     except Exception as exc:
         return False, f"needs attention ({exc})"
 
@@ -90,11 +93,16 @@ def _prompt_status(orchestrator) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"needs attention ({exc})"
     profile = "Kali VAPT profile" if "vulnerability assessor" in prompt and "Kali" in prompt else "custom profile"
-    return True, f"up ({profile}, {len(prompt)} chars)"
+    return True, f"compiled ({profile}, {len(prompt)} chars)"
 
 
 def _voice_status(voice_io) -> str:
     if not voice_io:
         return "inactive (text-only)"
     state = voice_io.state
-    return f"up ({'on' if state.enabled else 'off'}, muted={state.muted}, tts={state.tts})"
+    return f"initialized ({'on' if state.enabled else 'off'}, muted={state.muted}, tts={state.tts})"
+
+
+def _readiness_line(label: str, ok: bool, status: str) -> str:
+    icon = "[green]✓[/green]" if ok else "[yellow]![/yellow]"
+    return f"{icon}  {label + ':':<8} {status}"

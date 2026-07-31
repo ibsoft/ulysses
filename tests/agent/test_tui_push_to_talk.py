@@ -115,10 +115,10 @@ def test_boot_progress_resolves_checks_without_repeating_log_entries():
     middle = _boot_progress(message, 2, "-")
     final = _boot_progress(message, 5, "|")
 
-    assert "Brain: / checking..." in first
-    assert "Memory: . waiting" in first
+    assert "Brain:" in first and "/[/cyan]" in first and "checking..." in first
+    assert "Memory:" in first and "waiting" in first
     assert "Brain: up (provider / model)" in middle
-    assert "Skills: - checking..." in middle
+    assert "Skills:" in middle and "-[/cyan]" in middle and "checking..." in middle
     assert "Voice: inactive" in final
     assert "checking" not in final
 
@@ -144,7 +144,7 @@ async def test_sidebar_scrolls_without_hiding_lower_sections(tmp_path):
         app._boot_started_at = time.monotonic() - 3
         app._tick_boot_sequence()
         assert not app.query_one("#boot-status").display
-        assert sum("Cyber Sentinel initializing" in entry for entry in app.transcript_plain) == 1
+        assert sum("ULYSSES CYBER SENTINEL" in entry for entry in app.transcript_plain) == 1
         assert sidebar.max_scroll_y > 0
         sidebar.scroll_end(animate=False)
         await pilot.pause()

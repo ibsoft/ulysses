@@ -698,6 +698,7 @@ class UlyssesTextualApp(App):
         self._boot_spoken_message = ""
         self._boot_frame_index = 0
         self._boot_timer = None
+        self._boot_complete = False
         self._logo_frame_index = 0
         self.updates = UpdateManager(orchestrator.config.updates)
         self.title = self._local_version_text()
@@ -782,7 +783,6 @@ class UlyssesTextualApp(App):
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self._start_boot_sequence(boot_message, spoken_startup_brief(self.orchestrator, self.voice_io))
         self._refresh_status()
-        self.connectors.start_all()
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(1.0, self._maybe_collect_subagent_reports)
@@ -796,18 +796,23 @@ class UlyssesTextualApp(App):
         self._boot_message = message
         self._boot_spoken_message = spoken_message
         self._boot_frame_index = 0
+        self._boot_complete = False
         widget = self.query_one("#boot-status", Static)
         widget.display = True
         widget.update(_boot_progress(message, 0, self.SPINNER_FRAMES[0]))
         self._boot_timer = self.set_interval(0.12, self._tick_boot_sequence)
 
     def _tick_boot_sequence(self) -> None:
+        if self._boot_complete:
+            return
         elapsed = time.monotonic() - self._boot_started_at
         if elapsed >= 2.3:
+            self._boot_complete = True
             if self._boot_timer is not None:
                 self._boot_timer.pause()
             self.query_one("#boot-status", Static).display = False
             self._write_system(self._boot_message)
+            self.connectors.start_all()
             self._speak(self._boot_spoken_message)
             return
         completed = min(5, int(elapsed / 0.36))
@@ -2202,16 +2207,18 @@ def _time() -> str:
 
 def _boot_progress(message: str, completed: int, frame: str) -> str:
     labels = ("Brain", "Memory", "Skills", "Prompt", "Voice")
-    final_lines = {label: line for line in message.splitlines() for label in labels if line.startswith(f"{label}:")}
-    heading = message.splitlines()[0] if message else "Ulysses Cyber Sentinel initializing"
-    lines = [heading, "", "System readiness checks"]
+    final_lines = {label: line for line in message.splitlines() for label in labels if f"{label}:" in line}
+    message_lines = message.splitlines()
+    heading = message_lines[0] if message_lines else "[bold cyan]◆  ULYSSES CYBER SENTINEL[/bold cyan]"
+    subtitle = message_lines[1] if len(message_lines) > 1 else ""
+    lines = [heading, subtitle, "", "[bold]SYSTEM READINESS[/bold]"]
     for index, label in enumerate(labels):
         if index < completed:
-            lines.append(final_lines.get(label, f"{label}: ready"))
+            lines.append(final_lines.get(label, f"[green]✓[/green]  {label + ':':<8} ready"))
         elif index == completed:
-            lines.append(f"{label}: {frame} checking...")
+            lines.append(f"[cyan]{frame}[/cyan]  {label + ':':<8} checking...")
         else:
-            lines.append(f"{label}: . waiting")
+            lines.append(f"[dim]○  {label + ':':<8} waiting[/dim]")
     return "\n".join(lines)
 
 
