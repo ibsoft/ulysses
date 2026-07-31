@@ -18,7 +18,9 @@ def _config(tmp_path):
 
 def test_update_check_reports_available_commit(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    config.metadata_path.write_text(json.dumps({"main_commit": "a" * 40}), encoding="utf-8")
+    config.metadata_path.write_text(
+        json.dumps({"main_commit": "a" * 40, "source_branch": "v_2.0.13"}), encoding="utf-8"
+    )
     monkeypatch.setattr(
         update_module.subprocess,
         "run",
@@ -29,8 +31,10 @@ def test_update_check_reports_available_commit(tmp_path, monkeypatch):
         ),
     )
 
-    status = UpdateManager(config).check()
+    manager = UpdateManager(config)
+    status = manager.check()
 
+    assert manager.installed_branch == "v_2.0.13"
     assert status.state == "available"
     assert status.installed_commit == "a" * 40
     assert status.latest_commit == "b" * 40
@@ -39,7 +43,9 @@ def test_update_check_reports_available_commit(tmp_path, monkeypatch):
 
 def test_update_check_reports_current_commit(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    config.metadata_path.write_text(json.dumps({"main_commit": "a" * 40}), encoding="utf-8")
+    config.metadata_path.write_text(
+        json.dumps({"source_commit": "a" * 40, "source_branch": "v_2.0.13"}), encoding="utf-8"
+    )
     monkeypatch.setattr(
         update_module.subprocess,
         "run",
@@ -75,19 +81,25 @@ def test_update_install_uses_configured_updater_and_preserves_configuration(tmp_
     )
     message = manager.install()
 
-    assert calls == [[str(config.updater_path), config.repository_url, "main"]]
+    assert calls == [[str(config.updater_path), config.repository_url, "main", "v_2.1.0"]]
     assert "configuration preserved" in message
     assert manager.status.state == "staged"
 
 
 def test_update_install_refuses_when_main_is_current(tmp_path, monkeypatch):
     config = _config(tmp_path)
-    config.metadata_path.write_text(json.dumps({"main_commit": "a" * 40}), encoding="utf-8")
+    config.metadata_path.write_text(
+        json.dumps({"source_commit": "a" * 40, "source_branch": "v_2.0.13"}), encoding="utf-8"
+    )
     calls = []
 
     def run(command, **kwargs):
         calls.append(command)
-        return SimpleNamespace(returncode=0, stdout=f"{'a' * 40}\trefs/heads/main\n", stderr="")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"{'a' * 40}\trefs/heads/main\n{'a' * 40}\trefs/heads/v_2.0.13\n",
+            stderr="",
+        )
 
     monkeypatch.setattr(update_module.subprocess, "run", run)
 
@@ -96,3 +108,26 @@ def test_update_install_refuses_when_main_is_current(tmp_path, monkeypatch):
     assert "No update was staged" in message
     assert len(calls) == 1
     assert calls[0][:3] == ["git", "ls-remote", "--heads"]
+
+
+def test_update_check_reports_available_when_only_local_version_is_older(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    config.metadata_path.write_text(
+        json.dumps({"source_commit": "a" * 40, "source_branch": "v_2.0.12"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        update_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=f"{'a' * 40}\trefs/heads/main\n{'a' * 40}\trefs/heads/v_2.0.13\n",
+            stderr="",
+        ),
+    )
+
+    status = UpdateManager(config).check()
+
+    assert status.state == "available"
+    assert status.installed_commit == status.latest_commit
+    assert status.latest_branch == "v_2.0.13"
+    assert status.summary() == "available v_2.0.13 (installed v_2.0.12)"

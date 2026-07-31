@@ -14,11 +14,14 @@ class UpdateStatus:
     installed_commit: str = ""
     latest_commit: str = ""
     latest_branch: str = ""
+    installed_branch: str = ""
     error: str = ""
 
     def summary(self) -> str:
         if self.state == "available":
             release = f" {self.latest_branch}" if self.latest_branch else ""
+            if self.installed_commit == self.latest_commit and self.installed_branch:
+                return f"available{release} (installed {self.installed_branch})"
             return f"available{release} ({self.installed_commit[:8]} -> {self.latest_commit[:8]})"
         if self.state == "current":
             release = f" {self.latest_branch}" if self.latest_branch else ""
@@ -32,7 +35,8 @@ class UpdateManager:
     def __init__(self, config) -> None:
         self.config = config
         metadata = self._metadata()
-        self.status = UpdateStatus("unknown", latest_branch=str(metadata.get("source_branch") or ""))
+        self.installed_branch = str(metadata.get("source_branch") or "")
+        self.status = UpdateStatus("unknown", latest_branch=self.installed_branch)
 
     def _metadata(self) -> dict[str, str]:
         path = Path(self.config.metadata_path)
@@ -46,7 +50,8 @@ class UpdateManager:
         known_branch = self.status.latest_branch
         self.status = UpdateStatus("checking", latest_branch=known_branch)
         metadata = self._metadata()
-        installed = str(metadata.get("main_commit") or metadata.get("source_commit") or "").strip()
+        installed = str(metadata.get("source_commit") or metadata.get("main_commit") or "").strip()
+        installed_branch = str(metadata.get("source_branch") or self.installed_branch or "").strip()
         if not installed:
             self.status = UpdateStatus(
                 "unknown",
@@ -88,12 +93,15 @@ class UpdateManager:
             return self.status
         version_branches = [branch for branch in refs if re.match(r"^v?[_-]?\d", branch)]
         latest_branch = max(version_branches, key=_natural_version_key, default=self.config.branch)
-        state = "current" if installed == latest else "available"
+        commit_is_current = installed == latest
+        release_is_current = not installed_branch or installed_branch == latest_branch
+        state = "current" if commit_is_current and release_is_current else "available"
         self.status = UpdateStatus(
             state,
             installed_commit=installed,
             latest_commit=latest,
             latest_branch=latest_branch,
+            installed_branch=installed_branch,
         )
         return self.status
 
@@ -112,7 +120,7 @@ class UpdateManager:
             return self.status.error
         try:
             result = subprocess.run(
-                [str(script), self.config.repository_url, self.config.branch],
+                [str(script), self.config.repository_url, self.config.branch, release_branch],
                 capture_output=True,
                 text=True,
                 timeout=self.config.install_timeout_seconds,

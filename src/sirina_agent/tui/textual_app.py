@@ -700,6 +700,8 @@ class UlyssesTextualApp(App):
         self._boot_timer = None
         self._logo_frame_index = 0
         self.updates = UpdateManager(orchestrator.config.updates)
+        installed_version = self.updates.installed_branch or f"v{orchestrator.config.agent_version}"
+        self.title = f"{orchestrator.config.agent_name} {installed_version}"
         self.connectors = ConnectorManager.from_config(
             orchestrator.config,
             self._handle_connector_message,

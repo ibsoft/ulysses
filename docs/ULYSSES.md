@@ -375,10 +375,10 @@ receive stable `[ok]` or `[failed]` lines, and captured command output is shown 
 ### Updates From GitHub Main
 
 The installer writes `.ulysses-build.json` in the installed application with the source branch, source commit, tracked
-`main` commit, repository URL, and installation timestamp. When enabled, startup checks compare that recorded `main`
-commit with `refs/heads/main` from the configured GitHub repository. Ulysses independently resolves the highest
-version-named branch and displays it as the latest release branch in the sidebar and `/status`; update availability still
-tracks only `main`. The check is bounded, read-only, and does not modify the checkout.
+`main` commit, repository URL, and installation timestamp. When enabled, startup checks compare the source commit actually
+installed with `refs/heads/main` and compare the installed source branch with the highest remote version branch. This
+prevents stale remote-tracking metadata from marking an older local release current. The check is bounded, read-only, and
+does not modify the checkout.
 
 Use `/update` for a manual check. `/update install` refuses to proceed when remote `main` is current. When an update is
 available, it clones the configured branch into `~/.ulysses/update-stage` without modifying the running application.
