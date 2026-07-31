@@ -152,7 +152,7 @@ On Ubuntu/Debian:
 
 ```bash
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv portaudio19-dev libsndfile1 ripgrep
+sudo apt install -y python3.11 python3.11-venv portaudio19-dev libsndfile1 ripgrep xclip
 ```
 
 ## Install
@@ -397,6 +397,10 @@ Provider setup is available inside the TUI with `F7` or `/setup providers`. It c
 - OpenAI browser: Codex-managed ChatGPT login; model is discovered from authenticated `model/list`
 - Kimi / Moonshot: `https://api.moonshot.ai/v1`, key env `KIMI_API_KEY`
 - Local Ollama: `http://localhost:11434/v1`, no real API key required
+
+In the composer, `Ctrl+V` reads the system clipboard through `xclip`/`xsel` on X11 or `wl-clipboard` on Wayland.
+`Ctrl+Shift+V` remains the terminal emulator's native paste fallback. Multiline and large clipboard content is preserved
+as a text attachment instead of being truncated into a single-line input.
 
 Use an API-key provider by setting `llm.provider`, `llm.base_url`, and key settings in `config/ulysses.yaml` or with
 `ULYSSES__...` environment overrides. Interactive browser login must be started from `/setup providers`.

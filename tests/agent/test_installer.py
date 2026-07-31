@@ -82,3 +82,10 @@ def test_installer_discovers_and_persists_codex_executable():
 
     assert 'CODEX_BIN_DISCOVERED="$(command -v codex 2>/dev/null || true)"' in script
     assert 'ULYSSES_CODEX_BIN=${CODEX_BIN_DISCOVERED}' in script
+
+
+def test_installer_reports_optional_native_clipboard_dependencies():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert "Ctrl+V requires xclip or xsel on X11" in script
+    assert "Ctrl+V requires wl-clipboard on Wayland" in script

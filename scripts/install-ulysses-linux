@@ -350,3 +350,11 @@ Add this to your shell profile if needed:
 
 ${ACCENT}Launch:${RESET}  ulysses
 EOF
+
+if [[ -n "${DISPLAY:-}" ]] && ! command -v xclip >/dev/null 2>&1 && ! command -v xsel >/dev/null 2>&1; then
+  printf "\n%sClipboard:%s Ctrl+V requires xclip or xsel on X11. Install with: sudo apt install xclip\n" \
+    "${MUTED}" "${RESET}"
+elif [[ -n "${WAYLAND_DISPLAY:-}" ]] && ! command -v wl-paste >/dev/null 2>&1; then
+  printf "\n%sClipboard:%s Ctrl+V requires wl-clipboard on Wayland. Install with: sudo apt install wl-clipboard\n" \
+    "${MUTED}" "${RESET}"
+fi

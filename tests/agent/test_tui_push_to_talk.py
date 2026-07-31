@@ -11,7 +11,14 @@ from sirina_agent.llm.providers import MockProvider
 from sirina_agent.memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
 from sirina_agent.sessions.store import SessionStore
 from sirina_agent.skills.registry import SkillRegistry
-from sirina_agent.tui.textual_app import ComposerInput, UlyssesTextualApp, _boot_progress, _set_system_clipboard_text
+from sirina_agent.tui.textual_app import (
+    ComposerInput,
+    UlyssesTextualApp,
+    _boot_progress,
+    _set_system_clipboard_text,
+    _system_clipboard_backend,
+    _system_clipboard_text,
+)
 
 
 @pytest.fixture
@@ -65,6 +72,33 @@ def test_system_clipboard_uses_discovered_native_writer(monkeypatch):
 
     assert _set_system_clipboard_text("login-url")
     assert calls == [(["/dynamic/clipboard", "-selection", "clipboard"], "login-url")]
+
+
+def test_system_clipboard_reads_from_discovered_native_backend(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "sirina_agent.tui.textual_app.shutil.which",
+        lambda name: "/dynamic/clipboard" if name == "xclip" else None,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = "first line\nsecond line\n"
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return Result()
+
+    monkeypatch.setattr("sirina_agent.tui.textual_app.subprocess.run", run)
+
+    assert _system_clipboard_text() == "first line\nsecond line"
+    assert calls == [["/dynamic/clipboard", "-selection", "clipboard", "-o"]]
+
+
+def test_system_clipboard_backend_reports_missing_tools(monkeypatch):
+    monkeypatch.setattr("sirina_agent.tui.textual_app.shutil.which", lambda name: None)
+
+    assert _system_clipboard_backend() is None
 
 
 def test_boot_progress_resolves_checks_without_repeating_log_entries():

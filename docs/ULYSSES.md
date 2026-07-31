@@ -382,7 +382,7 @@ Manual install:
 
 ```bash
 sudo apt update
-sudo apt install -y python3.11 python3.11-venv portaudio19-dev libsndfile1 ripgrep
+sudo apt install -y python3.11 python3.11-venv portaudio19-dev libsndfile1 ripgrep xclip
 python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install -U pip
@@ -713,6 +713,7 @@ separate plaintext history file.
 
 - `Ctrl+U`: voice responses on/off
 - `Ctrl+M`: mute
+- `Ctrl+V`: paste from the system clipboard into the composer
 - `Ctrl+Y`: copy last assistant response
 - `Ctrl+Shift+Y`: copy the full transcript
 - `Ctrl+S`: toggle terminal selection mode
@@ -725,6 +726,10 @@ separate plaintext history file.
 - `Ctrl+Q`: quit
 
 Terminal drag-selection is owned by your terminal emulator, not Textual. Use `/select on` or `Ctrl+S` to blur the input and make native terminal selection easier; terminals that support copy-on-select will then copy selected text automatically. Ulysses also provides `/copy` for the last answer and `/copy all` for the transcript.
+
+`Ctrl+V` requires `xclip` or `xsel` on X11, `wl-clipboard` on Wayland, or PowerShell clipboard access under WSL.
+`Ctrl+Shift+V` is handled by the terminal emulator and remains the fallback when no native clipboard reader is installed.
+Multiline clipboard data is intercepted before the single-line composer can truncate it and is saved as a text attachment.
 
 ## Audio Troubleshooting
 
