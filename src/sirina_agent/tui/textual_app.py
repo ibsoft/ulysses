@@ -10,6 +10,7 @@ from datetime import datetime
 from itertools import cycle
 from threading import Thread
 
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -1428,24 +1429,48 @@ class UlyssesTextualApp(App):
         active = _active_command_policy(self.orchestrator)
         active_allowed = active.allowed if active is not None else set()
         configured_allowed = set(cfg.skills.command.allowed_commands)
-        policy_status = "synchronized" if active_allowed == configured_allowed else "mismatch"
-        self._write_system(
-            f"Session: {self.orchestrator.session_id}\n"
-            f"Provider: {cfg.llm.provider} / {cfg.llm.model}\n"
-            f"Latest branch: {self.updates.status.latest_branch or 'unknown'}\n"
-            f"Update: {self.updates.status.summary()}\n"
-            f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
-            f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
-            f"Sub-agents:\n{self.orchestrator.subagents.status_detail(10, 100) if self.orchestrator.subagents else 'disabled'}\n"
-            f"MCP:\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n"
-            f"Connectors: {self.connectors.summary()}\n"
-            f"Autonomous: {self.orchestrator.autonomous_enabled()}\n"
-            f"Godmode: {cfg.skills.command.godmode}\n"
-            f"Config path: {self.orchestrator.config_path}\n"
-            f"Command policy: {policy_status}\n"
-            f"Configured allowed commands: {len(configured_allowed)}\n"
-            f"Active allowed commands: {len(active_allowed)}"
-        )
+        policy_ok = active_allowed == configured_allowed
+        voice = "off"
+        if self.voice_io:
+            state = self.voice_io.state
+            voice = f"{'on' if state.enabled else 'off'} / muted={'yes' if state.muted else 'no'} / STT={state.stt} / TTS={state.tts}"
+        connector_on = any(status.configured for status in self.connectors.statuses())
+        local_release = self.updates.installed_branch or f"v{cfg.agent_version}"
+        update_state = self.updates.status.state
+        update_ok = update_state == "current"
+        update_icon = "[green]✓[/green]" if update_ok else "[yellow]![/yellow]"
+        subagents = self.orchestrator.subagents.summary() if self.orchestrator.subagents else "disabled"
+        mcp = self.orchestrator.mcp.summary() if self.orchestrator.mcp else "disabled"
+        active_skill = getattr(self.orchestrator, "active_skill", None) or "none"
+        lines = [
+            "[bold cyan]◆  ULYSSES SYSTEM STATUS[/bold cyan]",
+            "[dim]Local runtime and capability overview[/dim]",
+            "",
+            "[bold]CORE[/bold]",
+            f"[green]●[/green]  Session:    {escape(self.orchestrator.session_id)}",
+            f"[green]●[/green]  Provider:   {escape(cfg.llm.provider)} / {escape(cfg.llm.model)}",
+            f"[green]●[/green]  Release:    {escape(local_release)}",
+            f"[cyan]◆[/cyan]  Latest:     {escape(self.updates.status.latest_branch or 'unknown')}",
+            f"{update_icon}  Update:     {escape(self.updates.status.summary())}",
+            "",
+            "[bold]CAPABILITIES[/bold]",
+            _dashboard_line("Voice", voice, "ok" if voice != "off" else "off"),
+            _dashboard_line("Connector", "on" if connector_on else "off", "ok" if connector_on else "off"),
+            _dashboard_line("Skill", active_skill, "ok" if active_skill != "none" else "off"),
+            _dashboard_line("Sub-agents", subagents, "ok" if self.orchestrator.subagents else "off"),
+            _dashboard_line("MCP", mcp, "ok" if self.orchestrator.mcp and mcp != "disabled" else "off"),
+            _dashboard_line(
+                "Autonomous",
+                "on" if self.orchestrator.autonomous_enabled() else "off",
+                "ok" if self.orchestrator.autonomous_enabled() else "off",
+            ),
+            "",
+            "[bold]SECURITY[/bold]",
+            _dashboard_line("Policy", "synchronized" if policy_ok else "mismatch", "ok" if policy_ok else "warning"),
+            f"[cyan]◆[/cyan]  Commands:   {len(active_allowed)} active / {len(configured_allowed)} configured",
+            _dashboard_line("Godmode", "on" if cfg.skills.command.godmode else "off", "warning" if cfg.skills.command.godmode else "ok"),
+        ]
+        self._write_system("\n".join(lines))
 
     def action_reload_config(self) -> None:
         try:
@@ -1975,7 +2000,7 @@ class UlyssesTextualApp(App):
             f"Voice\n{voice}\n\n"
             f"Connector: {connector_state}\n\n"
             f"Active skill\n{active_skill}\n\n"
-            f"Sub-agents\n{self.orchestrator.subagents.status_detail() if self.orchestrator.subagents else 'disabled'}\n\n"
+            f"Sub-agents\n{self.orchestrator.subagents.summary() if self.orchestrator.subagents else 'disabled'}\n\n"
             f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Update\n{self.updates.status.state}\n\n"
@@ -2202,6 +2227,15 @@ class UlyssesTextualApp(App):
 
 def _time() -> str:
     return datetime.now().strftime("%H:%M")
+
+
+def _dashboard_line(label: str, value: object, state: str = "ok") -> str:
+    icons = {
+        "ok": "[green]✓[/green]",
+        "off": "[dim]○[/dim]",
+        "warning": "[yellow]![/yellow]",
+    }
+    return f"{icons.get(state, icons['off'])}  {label + ':':<12} {escape(str(value))}"
 
 
 def _boot_progress(message: str, completed: int, frame: str) -> str:
