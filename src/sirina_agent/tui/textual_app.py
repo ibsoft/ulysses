@@ -1432,7 +1432,6 @@ class UlyssesTextualApp(App):
         self._write_system(
             f"Session: {self.orchestrator.session_id}\n"
             f"Provider: {cfg.llm.provider} / {cfg.llm.model}\n"
-            f"Version: {cfg.agent_version}\n"
             f"Latest branch: {self.updates.status.latest_branch or 'unknown'}\n"
             f"Update: {self.updates.status.summary()}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
