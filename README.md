@@ -61,7 +61,7 @@ Search for the current official OWASP guidance for IDOR and summarize the primar
 For related searches, ask Ulysses to batch them:
 
 ```text
-Search for public subdomain and IP-address evidence for egt.gr and bizcore.gr. Group and summarize results by domain.
+Search for public subdomain and IP-address evidence for example.com and example.org. Group and summarize results by domain.
 ```
 
 The tool schema uses `query` for one search and `queries` for up to six searches. Domain-discovery wording adds targeted

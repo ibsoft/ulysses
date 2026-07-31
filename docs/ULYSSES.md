@@ -308,7 +308,7 @@ Find the current official OWASP guidance for BOLA and summarize it with source l
 Example batched request:
 
 ```text
-Find public subdomain and IP-address evidence for egt.gr and bizcore.gr using internet_search.
+Find public subdomain and IP-address evidence for example.com and example.org using internet_search.
 Group the sources and summarize the observations by domain.
 ```
 
