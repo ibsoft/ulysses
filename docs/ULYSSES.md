@@ -72,7 +72,8 @@ The TUI shows an estimated context gauge. At 100%, Ulysses summarizes older mess
 
 Ulysses is the sole supervisor for subordinate agents. It may create one because the user asks for a persistent specialist,
 or because a complex request benefits from independent bounded work. Users request the outcome in normal language; only
-the parent model can invoke `subagent_create`, `subagent_delegate`, `subagent_jobs`, and `subagent_delete`.
+the parent model can invoke `subagent_create`, `subagent_update`, `subagent_delegate`, `subagent_jobs`, and
+`subagent_delete`.
 Before creation or delegation, the default system prompt requires a `subagent_jobs` lookup. Ulysses checks persistent
 agents and active assignments, reuses a suitable specialist when one exists, and avoids duplicate active work. This adds
 a tool call only to sub-agent workflows rather than spending context tokens on a full catalog during every normal turn.
@@ -87,7 +88,8 @@ while jobs run. It collects newly completed and failed reports and posts a super
 turn is already in progress, the reports are injected into that parent response instead. Ulysses incorporates relevant
 results, handles uncertainty, and marks reports delivered only after a successful parent response. The sidebar and `F5`
 status include a `Delegated jobs` section showing which agent owns each recent task and whether it is queued, running,
-completed, or failed. Active work is listed first; complete history remains available through `subagent_jobs`.
+completed, or failed. It also shows each job's granted skills and the skill currently executing. Active work is listed
+first; complete history remains available through `subagent_jobs`.
 
 ```yaml
 subagents:
@@ -97,13 +99,30 @@ subagents:
   max_concurrent_jobs: 4
   max_tool_rounds: 6
   max_file_chars: 200000
+  delegable_skills: [internet_search]
+  denied_skills: [system_command, create_skill, subagent_create, subagent_update, subagent_delegate, subagent_jobs, subagent_delete]
+  allow_mcp: false
+  allowed_risk_levels: [low, medium]
+  max_skill_calls_per_job: 10
+  max_skill_output_chars: 20000
 ```
 
-Sub-agents use the provider and model active when their job starts. They receive only confined `workspace_list`,
-`workspace_read`, and `workspace_write` tools. Resolved paths must remain under that agent's workspace, file sizes are
-capped, and nested agent creation, command execution, sudo, credentials, policy changes, and direct user replies are not
-available. Ulysses retains final responsibility for authorization and the answer. Deletion is refused while jobs are
-active and otherwise requires typed confirmation because it removes the complete persistent workspace.
+Sub-agents use the provider and model active when their job starts. Every agent receives confined `workspace_list`,
+`workspace_read`, and `workspace_write` tools. Additional capabilities pass through `SubagentSkillBroker` and require
+three independent approvals: the skill must be globally delegable, persisted in the agent's allowlist, and granted to
+that job. A job may narrow but never expand its agent policy. Existing agent records without `allowed_skills` remain
+workspace-only after upgrade.
+
+The broker resolves tools from Ulysses' live registry, enforces enabled state and risk policy, caps calls and output, and
+passes only approved schemas into the sub-agent context. It records `skill-calls.jsonl` using skill names and result
+metadata without argument values. Skills requesting confirmation are refused without exposing confirmation tokens; the
+sub-agent reports the blocked requirement to Ulysses. Nested agent operations, command execution, sudo, credentials,
+policy changes, and direct user replies remain unavailable. MCP delegation is disabled by default. Ulysses retains final
+responsibility for authorization and the answer.
+
+`subagent_update` safely changes future grants on an existing agent. Running jobs retain their immutable job-level grant
+snapshot. `/reload` applies changes to the global delegation policy; thread-pool size changes take effect after restart.
+Deletion is refused while jobs are active and otherwise requires typed confirmation.
 
 ### Testing Sub-agents
 
@@ -116,6 +135,7 @@ Restart Ulysses, press `F6`, and verify these enabled skills are present:
 
 ```text
 subagent_create
+subagent_update
 subagent_delegate
 subagent_jobs
 subagent_delete
@@ -188,7 +208,33 @@ The write should be rejected as escaping the configured workspace. Confirm that 
 test ! -e ~/.ulysses/app/var/ulysses/subagents/ulysses-subagent-escape.txt && echo "isolation passed"
 ```
 
-#### 6. Delete the Test Agent
+#### 6. Verify Delegated Skill Policy
+
+Ask:
+
+```text
+Update test_researcher so its allowed skills contain only internet_search. Then delegate a job that uses internet_search
+to find the current official MCP Python SDK documentation and report the source URL. Grant only internet_search to the job.
+```
+
+Expected behavior:
+
+1. `subagent_update` persists `allowed_skills: ["internet_search"]` in `agent.json`.
+2. The new job persists `granted_skills: ["internet_search"]`; previous jobs remain unchanged.
+3. `F5` and the sidebar show `Skills: internet_search` and, during the call, `Using: internet_search`.
+4. `F6` labels `internet_search` as `Ulysses + sub-agents` and supervisor tools as `Ulysses only`.
+5. The job directory contains `skill-calls.jsonl` without the search query value.
+
+Negative test:
+
+```text
+Ask test_researcher to use system_command.
+```
+
+The tool is absent from the job schema and must not execute. Adding `system_command` to an agent or job grant is rejected
+even if it is mistakenly added to `delegable_skills`, because supervisor-only denial is enforced separately.
+
+#### 7. Delete the Test Agent
 
 After all jobs finish, ask:
 
@@ -199,7 +245,7 @@ Delete the persistent sub-agent test_researcher.
 Ulysses displays a typed confirmation token. Submit `/confirm <token>` with that exact token. The agent directory should be
 removed. Deletion while a job is queued or running must be refused.
 
-#### 7. Run Automated Tests
+#### 8. Run Automated Tests
 
 From the development checkout:
 
@@ -213,7 +259,10 @@ writes, and confirmed deletion. The full suite checks that the feature does not 
 
 Default skills:
 
-- `internet_search`: DuckDuckGo search with title, URL, snippet and timestamp fields when available.
+- `internet_search`: ranked and deduplicated internet search with title, URL, snippet, and timestamp fields when
+  available. Pass `query` for one search or `queries` for up to six independent searches in one call; results are grouped
+  by query. Domain-discovery requests add targeted site and certificate-transparency search variants. Malformed model
+  arguments trigger bounded internal correction attempts instead of exposing parser diagnostics to the operator.
 - `system_command`: allowlisted local command execution with confirmation, typed confirmation for high-risk commands, timeouts, output caps, environment filtering and audit logs.
 - `skills.command.bypass_confirmation_for_allowed_commands`: defaults to `true` and skips prompts for allowlisted non-high-risk commands.
 - `skills.command.godmode`: when set to `true`, gives full local command access. It bypasses the command allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, filtered environment, timeouts, output caps, and audit logging.
@@ -227,6 +276,70 @@ Sudo behavior:
 - The Rich fallback prompts for the sudo password in the terminal.
 - The password is passed directly to `sudo -S` and is not stored in config, logs, SQLite, FAISS, or skill metadata.
 - In godmode, Ulysses does not open the sudo password dialog or ask for typed high-risk confirmation; sudo behaves like any other unrestricted command and the system sudo flow decides what happens.
+
+## Internet Search
+
+`internet_search` is a network-enabled, read-only research skill. It queries bounded public search backends and returns
+normalized records containing a title, HTTP(S) source URL, snippet, and timestamp when the backend provides one. Results
+are ranked against the original request, deduplicated by URL, and grouped when several queries are submitted together.
+Invalid relative or non-web result URLs are discarded.
+
+### Arguments
+
+The published tool schema accepts:
+
+| Field | Type | Required | Behavior |
+| --- | --- | --- | --- |
+| `query` | string | One of `query` or `queries` | Executes one search. |
+| `queries` | array of strings | One of `query` or `queries` | Executes up to six independent searches and groups the results. |
+| `limit` | integer | No | Returns 1-10 results per query; the default is 5. |
+
+Ulysses is prompted to use `queries` rather than inventing fields such as `query2`. If a provider still emits malformed
+JSON, the orchestrator records a tool correction message internally and asks the provider to issue a valid replacement
+call. Correction attempts are bounded. The original parser exception is not shown in normal chat, and ambiguous arguments
+are never executed.
+
+Example single-query request:
+
+```text
+Find the current official OWASP guidance for BOLA and summarize it with source links.
+```
+
+Example batched request:
+
+```text
+Find public subdomain and IP-address evidence for egt.gr and bizcore.gr using internet_search.
+Group the sources and summarize the observations by domain.
+```
+
+For domain-discovery wording, the skill derives bounded site-search, DNS, and certificate-transparency query variants.
+This is passive public-source research, not an exhaustive asset-discovery guarantee. A professional authorized assessment
+should validate candidates using DNS resolution, certificate-transparency records, and approved enumeration tools before
+treating them as confirmed assets.
+
+### Search Failure Handling
+
+Search providers are attempted through bounded fallbacks. Ulysses stops collecting once enough unique results are
+available for a query. Backend exceptions and package warnings remain operator diagnostics and are not included in the
+normal answer. A query with no usable sources returns a concise no-results outcome so the agent can continue with another
+approved evidence source.
+
+### Search Smoke Test
+
+After installation or upgrade:
+
+1. Restart Ulysses and press `F6`.
+2. Confirm that `internet_search` is enabled.
+3. Submit the batched domain example above.
+4. Open `F5` while it runs and confirm `Using: internet_search`.
+5. Confirm that the answer is grouped by domain and contains valid source links.
+6. Confirm that no raw JSON parser exception, Python warning, or backend traceback appears in chat.
+
+Developers can run the focused regression tests with:
+
+```bash
+PYTHONPATH=src .venv/bin/pytest -q tests/agent/test_skills.py tests/agent/test_integration.py
+```
 
 ## Install on Ubuntu/Debian
 
@@ -408,7 +521,8 @@ sidebar for state and counts; `/mcp reconnect <server_id>` repeats discovery aft
 - Tool catalogs and descriptions are bounded, returned text is capped, and binary content is saved under the MCP artifact directory.
 - Confirmation and typed high-risk confirmation are applied by Ulysses regardless of server-provided annotations.
 - A failed server becomes offline or degraded without preventing other servers and built-in skills from operating.
-- Sub-agents receive only their confined workspace tools and do not inherit MCP capabilities.
+- Sub-agents do not inherit MCP capabilities. Explicit delegation requires `subagents.allow_mcp`, exact policy grants,
+  an allowed risk level, and a call that does not require confirmation; it is disabled by default.
 
 MCP currently exposes server tools. Server resources, prompts, roots, sampling requests, and OAuth discovery are not
 enabled by this adapter. For authenticated HTTP servers, provision a bearer token through the protected environment file.

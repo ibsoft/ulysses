@@ -11,7 +11,13 @@ from .mcp import MCPManager
 from .memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
 from .security.commands import CommandPolicy, CommandRunner
 from .sessions.store import SessionStore
-from .skills.builtin.subagents import CreateSubagentSkill, DelegateSubagentSkill, DeleteSubagentSkill, SubagentJobsSkill
+from .skills.builtin.subagents import (
+    CreateSubagentSkill,
+    DelegateSubagentSkill,
+    DeleteSubagentSkill,
+    SubagentJobsSkill,
+    UpdateSubagentSkill,
+)
 from .skills.builtin.system_command import SystemCommandSkill
 from .skills.registry import default_registry
 from .subagents import SubagentManager
@@ -50,8 +56,14 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
     )
     subagents = None
     if config.subagents.enabled:
-        subagents = SubagentManager(config.subagents, lambda: build_provider(config.llm))
+        subagents = SubagentManager(
+            config.subagents,
+            lambda: build_provider(config.llm),
+            skills,
+            audit_logger(config.logging.directory),
+        )
         skills.register(CreateSubagentSkill(subagents))
+        skills.register(UpdateSubagentSkill(subagents))
         skills.register(DelegateSubagentSkill(subagents))
         skills.register(SubagentJobsSkill(subagents))
         skills.register(DeleteSubagentSkill(subagents))

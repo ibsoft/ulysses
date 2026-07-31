@@ -58,9 +58,7 @@ class ToolCallProvider:
                 {
                     "message": {
                         "role": "assistant",
-                        "tool_calls": [
-                            {"function": {"name": "system_command", "arguments": '{"command": "pwd"}'}}
-                        ],
+                        "tool_calls": [{"function": {"name": "system_command", "arguments": '{"command": "pwd"}'}}],
                     }
                 }
             ]
@@ -97,7 +95,10 @@ class SearchThenAnswerProvider:
                                 {
                                     "id": "call_search",
                                     "type": "function",
-                                    "function": {"name": "internet_search", "arguments": '{"query": "latest security news"}'},
+                                    "function": {
+                                        "name": "internet_search",
+                                        "arguments": '{"query": "latest security news"}',
+                                    },
                                 }
                             ],
                         }
@@ -105,6 +106,39 @@ class SearchThenAnswerProvider:
                 ]
             }
         return {"choices": [{"message": {"role": "assistant", "content": "A sourced security-news summary."}}]}
+
+
+class MalformedSearchThenAnswerProvider:
+    def __init__(self):
+        self.calls = 0
+        self.messages = []
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        self.messages.append(messages)
+        if self.calls == 1:
+            arguments = '{"queries": ["subdomains egt.gr" "subdomains bizcore.gr"]}'
+        elif self.calls == 2:
+            arguments = '{"queries": ["subdomains egt.gr", "subdomains bizcore.gr"], "limit": 5}'
+        else:
+            return {"choices": [{"message": {"role": "assistant", "content": "Combined domain findings."}}]}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": f"call_search_{self.calls}",
+                                "type": "function",
+                                "function": {"name": "internet_search", "arguments": arguments},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
 
 
 class MultiToolThenAnswerProvider:
@@ -180,7 +214,8 @@ class StaticSearchSkill:
     )
 
     def run(self, arguments, context):
-        return SkillResult(True, "1. Security item\nhttps://example.test\nSummary", {"query": arguments["query"]})
+        query = arguments.get("query") or ", ".join(arguments.get("queries", []))
+        return SkillResult(True, "1. Security item\nhttps://example.test\nSummary", {"query": query})
 
 
 class StaticNamedSkill:
@@ -285,6 +320,33 @@ def test_orchestrator_completes_answer_after_tool_call(tmp_path):
     assert provider.messages[-1][-1]["role"] == "tool"
     assert provider.messages[-1][-1]["content"].startswith("1. Security item")
     assert sessions.messages(agent.session_id)[-1].content == answer
+
+
+def test_orchestrator_asks_model_to_correct_malformed_tool_arguments(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    registry = SkillRegistry()
+    registry.register(StaticSearchSkill())
+    provider = MalformedSearchThenAnswerProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+    activities = []
+    agent.set_activity_callback(activities.append)
+
+    answer = agent.handle_text("find subdomains for egt.gr and bizcore.gr")
+
+    assert answer == "Combined domain findings."
+    assert provider.calls == 3
+    assert "correcting tool arguments: internet_search" in activities
+    corrections = [
+        message
+        for message in provider.messages[1]
+        if message["role"] == "tool" and "valid JSON object" in message["content"]
+    ]
+    assert len(corrections) == 1
+    tool_messages = [message for message in sessions.messages(agent.session_id) if message.role == "tool"]
+    assert len(tool_messages) == 1
+    assert "invalid JSON" not in answer
 
 
 def test_orchestrator_runs_multiple_tool_calls_before_final_answer(tmp_path):
@@ -559,8 +621,7 @@ def test_explicit_skill_creation_is_directly_routed_from_attachment_preview():
 
     assert routed == (
         "network_reachability",
-        "Create and activate a complete skill named network_reachability.\n\n"
-        "Check authorized network 192.168.1.0/24.",
+        "Create and activate a complete skill named network_reachability.\n\nCheck authorized network 192.168.1.0/24.",
     )
 
 
@@ -575,9 +636,9 @@ def test_handle_text_bypasses_model_for_explicit_skill_creation():
     orchestrator.activity_callback = None
     orchestrator.sessions = RecordingSessions()
     orchestrator.session_id = "test-session"
-    orchestrator._run_skill = lambda name, arguments, resume_after_confirmation=False: calls.append(
-        (name, arguments, resume_after_confirmation)
-    ) or "skill routed"
+    orchestrator._run_skill = lambda name, arguments, resume_after_confirmation=False: (
+        calls.append((name, arguments, resume_after_confirmation)) or "skill routed"
+    )
 
     result = orchestrator.handle_text("Create and activate a complete skill named network_reachability. Check my LAN.")
 

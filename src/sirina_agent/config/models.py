@@ -68,6 +68,22 @@ class SubagentConfig(BaseModel):
     max_concurrent_jobs: int = 4
     max_tool_rounds: int = 6
     max_file_chars: int = 200_000
+    delegable_skills: list[str] = Field(default_factory=lambda: ["internet_search"])
+    denied_skills: list[str] = Field(
+        default_factory=lambda: [
+            "system_command",
+            "create_skill",
+            "subagent_create",
+            "subagent_update",
+            "subagent_delegate",
+            "subagent_jobs",
+            "subagent_delete",
+        ]
+    )
+    allow_mcp: bool = False
+    allowed_risk_levels: list[Literal["low", "medium", "high"]] = Field(default_factory=lambda: ["low", "medium"])
+    max_skill_calls_per_job: int = Field(default=10, ge=1, le=100)
+    max_skill_output_chars: int = Field(default=20_000, ge=1_000, le=200_000)
 
 
 class AutonomousConfig(BaseModel):

@@ -85,7 +85,9 @@ class AgentOrchestrator:
         if self.tool_result_callback:
             self.tool_result_callback(name, content, metadata)
 
-    def _save_assistant_message(self, content: str, metadata: dict | None = None, importance: float = 0.3, source_prefix: str = "session") -> None:
+    def _save_assistant_message(
+        self, content: str, metadata: dict | None = None, importance: float = 0.3, source_prefix: str = "session"
+    ) -> None:
         self.sessions.add_message(self.session_id, "assistant", content, metadata)
         self._save_memory_soft(
             content,
@@ -146,7 +148,9 @@ class AgentOrchestrator:
         self._activity("checking context")
         self._maybe_consolidate_session()
         self._activity("searching memory")
-        memories = self.memory.search(text, top_k=self.config.memory.top_k) if self.config.privacy.retrieve_memory else []
+        memories = (
+            self.memory.search(text, top_k=self.config.memory.top_k) if self.config.privacy.retrieve_memory else []
+        )
         context = "\n".join(f"- {item.text} ({item.source}, {item.created_at})" for item in memories)
         self._activity("preparing prompt")
         system = self._system_prompt()
@@ -369,7 +373,11 @@ class AgentOrchestrator:
             result = self._run_skill_result("system_command", {"command": command})
             if result.requires_confirmation:
                 self._activity(f"waiting for confirmation: system_command")
-                self.pending_tool = {"name": "system_command", "arguments": {"command": command}, "token": result.confirmation_token}
+                self.pending_tool = {
+                    "name": "system_command",
+                    "arguments": {"command": command},
+                    "token": result.confirmation_token,
+                }
                 return result.confirmation_prompt or result.content
             self._record_tool_result(
                 "system_command",
@@ -394,10 +402,6 @@ class AgentOrchestrator:
             for index, tool_call in enumerate(tool_calls, start=1):
                 function = tool_call.get("function", {})
                 name = function.get("name")
-                try:
-                    arguments = json.loads(function.get("arguments") or "{}")
-                except json.JSONDecodeError as exc:
-                    return f"Tool call for `{name or 'unknown'}` had invalid JSON arguments: {exc}"
                 tool_call_id = tool_call.get("id") or f"call_{name}_{index}"
                 assistant_tool_calls.append(
                     {
@@ -406,6 +410,33 @@ class AgentOrchestrator:
                         "function": function,
                     }
                 )
+                try:
+                    raw_arguments = function.get("arguments") or "{}"
+                    if isinstance(raw_arguments, dict):
+                        arguments = raw_arguments
+                    else:
+                        text = str(raw_arguments).strip()
+                        if text.startswith("```") and text.endswith("```"):
+                            text = text[3:-3].strip()
+                            if text.lower().startswith("json"):
+                                text = text[4:].lstrip()
+                        arguments = json.loads(text)
+                    if not isinstance(arguments, dict):
+                        raise TypeError("tool arguments must be a JSON object")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    self._activity(f"correcting tool arguments: {name or 'unknown'}")
+                    tool_results.append(
+                        (
+                            tool_call_id,
+                            name or "unknown",
+                            (
+                                "The tool arguments were invalid. Return a corrected call for this tool using exactly "
+                                "one valid JSON object that conforms to its published parameter schema. Do not explain "
+                                "the correction and do not repeat already completed tool calls."
+                            ),
+                        )
+                    )
+                    continue
                 if len(tool_calls) == 1:
                     self._activity(f"running tool: {name}")
                 else:
@@ -426,13 +457,17 @@ class AgentOrchestrator:
                 if not result.ok:
                     self._activity(f"tool failed: {name}")
                     if name == "create_skill":
-                        content = f"Skill creation failed after automated generation and repair attempts: {result.content}"
+                        content = (
+                            f"Skill creation failed after automated generation and repair attempts: {result.content}"
+                        )
                         self._save_assistant_message(content)
                         return content
                     continue
                 self._activity(f"tool complete: {name}")
 
-            messages.append({"role": "assistant", "content": message.get("content") or "", "tool_calls": assistant_tool_calls})
+            messages.append(
+                {"role": "assistant", "content": message.get("content") or "", "tool_calls": assistant_tool_calls}
+            )
             for tool_call_id, name, content in tool_results:
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "name": name, "content": content})
             self._activity("composing final answer")
@@ -449,7 +484,11 @@ class AgentOrchestrator:
 
         self._activity("composing final answer")
         response = self.llm.complete(messages, tools=None)
-        content = (response["choices"][0]["message"].get("content") or "").strip() or last_tool_content
+        content = (
+            (response["choices"][0]["message"].get("content") or "").strip()
+            or last_tool_content
+            or "I could not complete the requested tool operation after bounded argument-correction attempts."
+        )
         self._activity("saving answer")
         self._save_assistant_message(content)
         return content
@@ -503,7 +542,9 @@ class AgentOrchestrator:
                 result.data["loaded"] = loaded_name
             return result
         except Exception as exc:
-            return SkillResult(False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": arguments, "error": str(exc)})
+            return SkillResult(
+                False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": arguments, "error": str(exc)}
+            )
         finally:
             self.active_skill = previous_skill
 
@@ -577,7 +618,9 @@ class AgentOrchestrator:
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content
-        self._record_tool_result(pending["name"], result.content, {"skill": pending["name"], "ok": result.ok, "data": result.data})
+        self._record_tool_result(
+            pending["name"], result.content, {"skill": pending["name"], "ok": result.ok, "data": result.data}
+        )
         if pending["name"] == "create_skill" and result.ok and pending.get("resume_after_confirmation"):
             self.skill_resume_name = str(result.data.get("loaded") or "") or None
         return result.content
@@ -695,8 +738,7 @@ class AgentOrchestrator:
             note = (response["choices"][0]["message"].get("content") or "").strip()
         except Exception as exc:
             note = (
-                f"Autonomous defense check completed, but LLM Brain failed: {exc}\n\n"
-                f"{assessment.prompt_text()[:4000]}"
+                f"Autonomous defense check completed, but LLM Brain failed: {exc}\n\n{assessment.prompt_text()[:4000]}"
             )
         if not note:
             note = assessment.prompt_text()
@@ -710,7 +752,12 @@ class AgentOrchestrator:
             note,
             source=f"autonomous-defense:{self.session_id}",
             importance=0.8 if assessment.score else 0.5,
-            metadata={"autonomous": True, "defense": True, "score": assessment.score, "severity": assessment.highest_severity},
+            metadata={
+                "autonomous": True,
+                "defense": True,
+                "score": assessment.score,
+                "severity": assessment.highest_severity,
+            },
         )
         metadata = self.sessions.session_metadata(self.session_id)
         metadata["last_autonomous_report_at"] = now.isoformat()
@@ -730,7 +777,14 @@ class AgentOrchestrator:
                     self.session_id,
                     "tool",
                     content,
-                    {"skill": "system_command", "ok": False, "autonomous": True, "defense_action": action.name, "command": action.command, "planned_only": True},
+                    {
+                        "skill": "system_command",
+                        "ok": False,
+                        "autonomous": True,
+                        "defense_action": action.name,
+                        "command": action.command,
+                        "planned_only": True,
+                    },
                 )
             return
         for action in assessment.planned_actions:
@@ -738,7 +792,9 @@ class AgentOrchestrator:
             result = self._run_skill_result("system_command", {"command": action.command})
             content = result.confirmation_prompt or result.content
             ok = bool(result.ok and not result.requires_confirmation)
-            assessment.action_outputs.append({"name": action.name, "command": action.command, "ok": ok, "content": content})
+            assessment.action_outputs.append(
+                {"name": action.name, "command": action.command, "ok": ok, "content": content}
+            )
             self.sessions.add_message(
                 self.session_id,
                 "tool",
@@ -764,7 +820,13 @@ class AgentOrchestrator:
                 self.session_id,
                 "tool",
                 content,
-                {"skill": "system_command", "ok": False, "autonomous": True, "defense_check": check.name, "command": check.command},
+                {
+                    "skill": "system_command",
+                    "ok": False,
+                    "autonomous": True,
+                    "defense_check": check.name,
+                    "command": check.command,
+                },
             )
             return False, content
         if result.requires_confirmation:
@@ -773,14 +835,28 @@ class AgentOrchestrator:
                 self.session_id,
                 "tool",
                 content,
-                {"skill": "system_command", "ok": False, "autonomous": True, "defense_check": check.name, "command": check.command, "requires_confirmation": True},
+                {
+                    "skill": "system_command",
+                    "ok": False,
+                    "autonomous": True,
+                    "defense_check": check.name,
+                    "command": check.command,
+                    "requires_confirmation": True,
+                },
             )
             return False, content
         self.sessions.add_message(
             self.session_id,
             "tool",
             result.content,
-            {"skill": "system_command", "ok": result.ok, "data": result.data, "autonomous": True, "defense_check": check.name, "command": check.command},
+            {
+                "skill": "system_command",
+                "ok": result.ok,
+                "data": result.data,
+                "autonomous": True,
+                "defense_check": check.name,
+                "command": check.command,
+            },
         )
         return result.ok, result.content
 
@@ -831,7 +907,9 @@ class AgentOrchestrator:
         if not note:
             return None
         self.sessions.add_message(self.session_id, "assistant", note, {"autonomous": True})
-        self._save_memory_soft(note, source=f"autonomous:{self.session_id}", importance=0.65, metadata={"autonomous": True})
+        self._save_memory_soft(
+            note, source=f"autonomous:{self.session_id}", importance=0.65, metadata={"autonomous": True}
+        )
         metadata = self.sessions.session_metadata(self.session_id)
         metadata["last_autonomous_report_at"] = now.isoformat()
         self.sessions.update_session_metadata(self.session_id, metadata)

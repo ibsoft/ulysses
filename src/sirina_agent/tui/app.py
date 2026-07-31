@@ -235,12 +235,19 @@ class RichTUI:
         elif cmd == "/switch" and len(parts) > 1:
             self.orchestrator.session_id = parts[1]
         elif cmd == "/skills":
-            table = Table("name", "risk", "enabled", "permissions", "status")
+            table = Table("name", "risk", "enabled", "scope", "permissions", "status")
             for manifest in self.orchestrator.skills.manifests():
+                scope = (
+                    "Ulysses + sub-agents"
+                    if self.orchestrator.subagents
+                    and self.orchestrator.subagents.capabilities.is_delegable(manifest.name)
+                    else "Ulysses only"
+                )
                 table.add_row(
                     manifest.name,
                     manifest.risk_level,
                     str(manifest.enabled),
+                    scope,
                     ", ".join(manifest.required_permissions),
                     "ready",
                 )
@@ -249,6 +256,7 @@ class RichTUI:
                     name,
                     manifest.risk_level if manifest else "unknown",
                     str(manifest.enabled) if manifest else "unknown",
+                    "unavailable",
                     ", ".join(manifest.required_permissions) if manifest else "",
                     f"load_failed: {error}",
                 )
@@ -329,6 +337,8 @@ class RichTUI:
                 if not self.orchestrator.sync_command_policy_from_config(force=True):
                     raise RuntimeError("command policy synchronization failed")
                 loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
+                if self.orchestrator.subagents:
+                    self.orchestrator.subagents.reconfigure(self.orchestrator.config.subagents)
                 if self.orchestrator.mcp:
                     self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp)
                 self.artifacts = ArtifactManager.from_config(self.orchestrator.config)

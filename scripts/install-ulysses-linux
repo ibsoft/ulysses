@@ -138,11 +138,52 @@ prepare_directories() {
   mkdir -p "${APP_HOME}" "${CONFIG_HOME}" "${BIN_HOME}"
 }
 
+recover_stale_backup() {
+  local prefix="$1"
+  local target="$2"
+  local candidate
+  local latest=""
+  local backups=()
+  shopt -s nullglob
+  backups=("${APP_HOME}/${prefix}.backup."*)
+  shopt -u nullglob
+  for candidate in "${backups[@]}"; do
+    if [[ -z "${latest}" || "${candidate}" -nt "${latest}" ]]; then
+      latest="${candidate}"
+    fi
+  done
+  if [[ -n "${latest}" ]]; then
+    rm -rf "${target}"
+    mkdir -p "$(dirname -- "${target}")"
+    mv "${latest}" "${target}"
+    printf "Recovered preserved data from interrupted deployment: %s\n" "${prefix}"
+  fi
+}
+
 sync_application() {
   if [[ "${PROJECT_ROOT}" != "${APP_SOURCE}" ]]; then
+    recover_stale_backup ".models" "${APP_SOURCE}/models"
+    recover_stale_backup ".runtime" "${APP_SOURCE}/var/ulysses"
+    recover_stale_backup ".skills" "${APP_SOURCE}/skills"
     MODEL_BACKUP=""
     RUNTIME_BACKUP=""
     SKILLS_BACKUP=""
+    restore_sync_backups() {
+      if [[ -n "${MODEL_BACKUP}" && -d "${MODEL_BACKUP}" ]]; then
+        rm -rf "${APP_SOURCE}/models"
+        mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
+      fi
+      if [[ -n "${RUNTIME_BACKUP}" && -d "${RUNTIME_BACKUP}" ]]; then
+        rm -rf "${APP_SOURCE}/var/ulysses"
+        mkdir -p "${APP_SOURCE}/var"
+        mv "${RUNTIME_BACKUP}" "${APP_SOURCE}/var/ulysses"
+      fi
+      if [[ -n "${SKILLS_BACKUP}" && -d "${SKILLS_BACKUP}" ]]; then
+        rm -rf "${APP_SOURCE}/skills"
+        mv "${SKILLS_BACKUP}" "${APP_SOURCE}/skills"
+      fi
+    }
+    trap restore_sync_backups EXIT
     if [[ -d "${APP_SOURCE}/models" ]]; then
       MODEL_BACKUP="${APP_HOME}/.models.backup.$$"
       mv "${APP_SOURCE}/models" "${MODEL_BACKUP}"
@@ -157,20 +198,23 @@ sync_application() {
     fi
     rm -rf "${APP_SOURCE}"
     mkdir -p "${APP_SOURCE}"
-    cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"
-    rm -rf "${APP_SOURCE}/var/ulysses"
-    if [[ -n "${MODEL_BACKUP}" ]]; then
-      rm -rf "${APP_SOURCE}/models"
-      mv "${MODEL_BACKUP}" "${APP_SOURCE}/models"
-    fi
-    if [[ -n "${RUNTIME_BACKUP}" ]]; then
-      mkdir -p "${APP_SOURCE}/var"
-      mv "${RUNTIME_BACKUP}" "${APP_SOURCE}/var/ulysses"
-    fi
-    if [[ -n "${SKILLS_BACKUP}" ]]; then
-      rm -rf "${APP_SOURCE}/skills"
-      mv "${SKILLS_BACKUP}" "${APP_SOURCE}/skills"
-    fi
+    tar \
+      --exclude='./.git' \
+      --exclude='./.venv' \
+      --exclude='./.pytest_cache' \
+      --exclude='./.ruff_cache' \
+      --exclude='./models' \
+      --exclude='./skills' \
+      --exclude='./var/ulysses' \
+      --exclude='__pycache__' \
+      --exclude='*.pyc' \
+      -C "${PROJECT_ROOT}" -cf - . |
+      tar -C "${APP_SOURCE}" -xf -
+    restore_sync_backups
+    MODEL_BACKUP=""
+    RUNTIME_BACKUP=""
+    SKILLS_BACKUP=""
+    trap - EXIT
   fi
   mkdir -p "${APP_SOURCE}/var/ulysses/logs"
 }

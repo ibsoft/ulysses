@@ -13,6 +13,19 @@ def test_upgrade_preserves_runtime_and_models():
     assert 'rm -rf "${APP_SOURCE}/var/ulysses"\nmkdir' not in script
 
 
+def test_sync_excludes_development_state_and_recovers_interrupted_backups():
+    script = INSTALLER.read_text(encoding="utf-8")
+
+    assert "recover_stale_backup" in script
+    assert 'recover_stale_backup ".runtime" "${APP_SOURCE}/var/ulysses"' in script
+    assert "trap restore_sync_backups EXIT" in script
+    assert "trap - EXIT" in script
+    assert "--exclude='./.venv'" in script
+    assert "--exclude='./.git'" in script
+    assert "--exclude='./models'" in script
+    assert 'cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"' not in script
+
+
 def test_upgrade_refreshes_config_with_backup_by_default():
     script = INSTALLER.read_text(encoding="utf-8")
 
