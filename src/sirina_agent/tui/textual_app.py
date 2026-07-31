@@ -700,8 +700,7 @@ class UlyssesTextualApp(App):
         self._boot_timer = None
         self._logo_frame_index = 0
         self.updates = UpdateManager(orchestrator.config.updates)
-        installed_version = self.updates.installed_branch or f"v{orchestrator.config.agent_version}"
-        self.title = f"{orchestrator.config.agent_name} {installed_version}"
+        self.title = self._local_version_text()
         self.connectors = ConnectorManager.from_config(
             orchestrator.config,
             self._handle_connector_message,
@@ -1979,15 +1978,24 @@ class UlyssesTextualApp(App):
         )
 
     def _brand_version_text(self) -> str:
-        version = self.updates.status.latest_branch or f"v{self.orchestrator.config.agent_version}"
-        return f"{self.orchestrator.config.agent_name} {version}"
+        return self._local_version_text()
+
+    def _local_version_text(self) -> str:
+        version = self.updates.installed_branch or f"v{self.orchestrator.config.agent_version}"
+        update_label = " (update)" if self.updates.status.state in {"available", "staged"} else ""
+        return f"{self.orchestrator.config.agent_name} {version}{update_label}"
+
+    def _refresh_version_labels(self) -> None:
+        self.title = self._local_version_text()
+        if self.is_mounted:
+            self.query_one("#brand", Label).update(self._brand_version_text())
 
     def _check_update_in_thread(self, announce: bool) -> None:
         status = self.updates.check()
         self.call_from_thread(self._finish_update_check, status, announce)
 
     def _finish_update_check(self, status, announce: bool) -> None:
-        self.query_one("#brand", Label).update(self._brand_version_text())
+        self._refresh_version_labels()
         self._refresh_status()
         if status.state == "available":
             self._write_system(f"Ulysses update available from GitHub main: {status.summary()}\nRun /update install to apply it.")
@@ -2000,6 +2008,7 @@ class UlyssesTextualApp(App):
 
     def _finish_update_install(self, message: str) -> None:
         self._stop_waiting()
+        self._refresh_version_labels()
         if self.updates.status.error:
             self._write_error(message)
         else:

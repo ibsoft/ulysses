@@ -380,6 +380,11 @@ installed with `refs/heads/main` and compare the installed source branch with th
 prevents stale remote-tracking metadata from marking an older local release current. The check is bounded, read-only, and
 does not modify the checkout.
 
+The top header and the label directly below the sidebar logo always use the locally installed `source_branch` from build
+metadata. They do not change when a remote check discovers a newer version. The remote latest branch is reported only in
+update status, `/update`, `/status`, and update notifications. When an update is available or staged, the two local labels
+append `(update)` without replacing the installed version number.
+
 Use `/update` for a manual check. `/update install` refuses to proceed when remote `main` is current. When an update is
 available, it clones the configured branch into `~/.ulysses/update-stage` without modifying the running application.
 Exit and launch `ulysses` again; the launcher applies the staged installer with `--preserve-config` before opening SQLite

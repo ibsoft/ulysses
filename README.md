@@ -300,12 +300,11 @@ remote version branch. This avoids treating an older local release as current me
 the installer's remote-tracking refs. If either the installed commit or version is behind, the sidebar and `/status` show
 that an update is available and the transcript displays one concise notification.
 
-The sidebar displays the version once, centered directly below the Ulysses logo. The remaining sidebar status shows only
-the update state so the version is not duplicated.
-
-The top TUI header displays the locally installed source branch, for example
-`Ulysses v_2.0.14 — local-first AI voice agent`. This remains the installed version even when GitHub reports that a newer
-release is available.
+The sidebar label directly below the Ulysses logo and the top TUI header both display the locally installed source branch,
+for example `Ulysses v_2.0.15`. They do not switch to the remote release number during an update check. The remaining
+sidebar status shows only update state; remote latest-version details are shown by `/update`, `/status`, and update
+notifications. When an update is available or staged, both local labels append `(update)`, for example
+`Ulysses v_2.0.15 (update)`.
 
 Check manually from the command box:
 
