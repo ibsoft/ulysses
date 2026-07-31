@@ -49,6 +49,7 @@ from sirina_agent.mcp.client import SDKMCPClient
 from sirina_agent.mcp.setup import MCPServerSetup, apply_mcp_server_setup
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_LOGO
+from sirina_agent.updates import UpdateManager
 
 
 def create_tui(orchestrator, voice_io=None):
@@ -76,12 +77,17 @@ class RichTUI:
             self._handle_connector_message,
             self.console.print,
         )
+        self.updates = UpdateManager(orchestrator.config.updates)
 
     def run(self) -> None:
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self.console.print(Panel(f"{ULYSSES_LOGO}\n{boot_message}"))
         self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
         self.connectors.start_all()
+        if self.orchestrator.config.updates.enabled and self.orchestrator.config.updates.check_on_startup:
+            status = self.updates.check()
+            if status.state == "available":
+                self.console.print(f"Ulysses update available: {status.summary()}. Run /update install to apply it.")
         while True:
             if self._queued_input is None:
                 text = Prompt.ask("[bold cyan]you[/bold cyan]")
@@ -331,6 +337,18 @@ class RichTUI:
                 self.console.print(f"Autonomous mode: {'on' if self.orchestrator.autonomous_enabled() else 'off'}")
         elif cmd in {"/status", "/config"}:
             self.console.print_json(data=self.orchestrator.config.model_dump_safe())
+            self.console.print(f"Update: {self.updates.status.summary()}")
+        elif cmd == "/update":
+            if len(parts) > 1 and parts[1].lower() == "install":
+                with self.console.status("[bold cyan]Installing update from GitHub main...[/bold cyan]", spinner="dots"):
+                    message = self.updates.install()
+                self.console.print(Panel(message, title="Update"))
+            elif len(parts) == 1 or parts[1].lower() == "check":
+                with self.console.status("[bold cyan]Checking GitHub main...[/bold cyan]", spinner="dots"):
+                    status = self.updates.check()
+                self.console.print(Panel(status.error or status.summary(), title="Update"))
+            else:
+                self.console.print("Usage: /update or /update install")
         elif cmd == "/reload":
             try:
                 self.orchestrator.config = load_config(self.orchestrator.config_path)

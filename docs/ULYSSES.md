@@ -372,6 +372,33 @@ reports, sessions, FAISS memory, metadata, logs, downloaded models, generated sk
 Interactive terminals show an animated numbered phase indicator for every installer action. Noninteractive environments
 receive stable `[ok]` or `[failed]` lines, and captured command output is shown when a phase fails.
 
+### Updates From GitHub Main
+
+The installer writes `.ulysses-build.json` in the installed application with the source branch, source commit, tracked
+`main` commit, repository URL, and installation timestamp. When enabled, startup checks compare that recorded `main`
+commit with `refs/heads/main` from the configured GitHub repository. Ulysses independently resolves the highest
+version-named branch and displays it as the latest release branch in the sidebar and `/status`; update availability still
+tracks only `main`. The check is bounded, read-only, and does not modify the checkout.
+
+Use `/update` for a manual check. `/update install` refuses to proceed when remote `main` is current. When an update is
+available, it clones the configured branch into `~/.ulysses/update-stage` without modifying the running application.
+Exit and launch `ulysses` again; the launcher applies the staged installer with `--preserve-config` before opening SQLite
+or other runtime files. This avoids live-file replacement and preserves the active config, runtime projects, reports,
+sessions, memory, generated skills, connectors, logs, secrets, and models. A failed apply retains both the existing
+installation and staged checkout for diagnosis or retry.
+
+```yaml
+updates:
+  enabled: true
+  check_on_startup: true
+  repository_url: https://github.com/ibsoft/ulysses.git
+  branch: main
+  metadata_path: .ulysses-build.json
+  updater_path: scripts/update-ulysses-linux
+  timeout_seconds: 10
+  install_timeout_seconds: 1800
+```
+
 Set `OPENAI_API_KEY` in `~/.config/ulysses/env`, then run:
 
 ```bash
@@ -601,7 +628,7 @@ independent of `/voice off` and `/mute`, which control spoken responses.
 
 ## Slash Commands
 
-`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/setup mcp`, `/mcp servers`, `/mcp tools`, `/mcp reconnect <server_id>`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/status`, `/export`, `/quit`.
+`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/setup mcp`, `/mcp servers`, `/mcp tools`, `/mcp reconnect <server_id>`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/update`, `/update install`, `/status`, `/export`, `/quit`.
 
 Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
 

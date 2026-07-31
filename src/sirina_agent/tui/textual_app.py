@@ -59,6 +59,7 @@ from sirina_agent.mcp.client import SDKMCPClient
 from sirina_agent.mcp.setup import MCPServerSetup, apply_mcp_server_setup
 from sirina_agent.tui.boot import spoken_startup_brief, startup_brief
 from sirina_agent.tui.branding import ULYSSES_SIDEBAR_LOGO, ULYSSES_SPEAKING_LOGOS
+from sirina_agent.updates import UpdateManager
 
 
 class TranscriptLog(RichLog):
@@ -698,6 +699,7 @@ class UlyssesTextualApp(App):
         self._boot_frame_index = 0
         self._boot_timer = None
         self._logo_frame_index = 0
+        self.updates = UpdateManager(orchestrator.config.updates)
         self.connectors = ConnectorManager.from_config(
             orchestrator.config,
             self._handle_connector_message,
@@ -714,7 +716,7 @@ class UlyssesTextualApp(App):
             with VerticalScroll(id="sidebar"):
                 yield Static(ULYSSES_SIDEBAR_LOGO, id="logo")
                 yield Label(
-                    f"{self.orchestrator.config.agent_name} v{self.orchestrator.config.agent_version}",
+                    self._brand_version_text(),
                     id="brand",
                     classes="section-title",
                 )
@@ -751,6 +753,7 @@ class UlyssesTextualApp(App):
                     "/memory\n"
                     "/context\n"
                     "/reload\n"
+                    "/update [install]\n"
                     "/sessions\n"
                     "/downloads\n"
                     "/theme [name]\n"
@@ -784,6 +787,8 @@ class UlyssesTextualApp(App):
         self.set_interval(1.0, self._maybe_collect_subagent_reports)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
+        if self.orchestrator.config.updates.enabled and self.orchestrator.config.updates.check_on_startup:
+            Thread(target=self._check_update_in_thread, args=(False,), daemon=True).start()
 
     def _start_boot_sequence(self, message: str, spoken_message: str) -> None:
         self._boot_started_at = time.monotonic()
@@ -1262,6 +1267,15 @@ class UlyssesTextualApp(App):
             self.action_status()
         elif cmd == "/reload":
             self.action_reload_config()
+        elif cmd == "/update":
+            if len(parts) > 1 and parts[1].lower() == "install":
+                self._start_waiting()
+                Thread(target=self._install_update_in_thread, daemon=True).start()
+            elif len(parts) == 1 or parts[1].lower() == "check":
+                self._write_system("Checking GitHub main for updates...")
+                Thread(target=self._check_update_in_thread, args=(True,), daemon=True).start()
+            else:
+                self._write_system("Usage: /update or /update install")
         elif cmd == "/mcp":
             self._mcp_command(parts)
         elif cmd == "/setup":
@@ -1413,6 +1427,8 @@ class UlyssesTextualApp(App):
             f"Session: {self.orchestrator.session_id}\n"
             f"Provider: {cfg.llm.provider} / {cfg.llm.model}\n"
             f"Version: {cfg.agent_version}\n"
+            f"Latest branch: {self.updates.status.latest_branch or 'unknown'}\n"
+            f"Update: {self.updates.status.summary()}\n"
             f"Voice: {getattr(self.voice_io, 'state', None).__dict__ if self.voice_io else 'inactive'}\n"
             f"Active skill: {getattr(self.orchestrator, 'active_skill', None) or 'none'}\n"
             f"Sub-agents:\n{self.orchestrator.subagents.status_detail(10, 100) if self.orchestrator.subagents else 'disabled'}\n"
@@ -1947,7 +1963,6 @@ class UlyssesTextualApp(App):
         gauge = _gauge(context["percent"])
         self.query_one("#status", Static).update(
             f"Session\n{self.orchestrator.session_id}\n\n"
-            f"Version\n{self.orchestrator.config.agent_version}\n\n"
             f"Provider\n{self.orchestrator.config.llm.provider}\n\n"
             f"Context\n{gauge} {context['percent']}%\n"
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
@@ -1957,8 +1972,37 @@ class UlyssesTextualApp(App):
             f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
             f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
+            f"Update\n{self.updates.status.state}\n\n"
             f"Theme\n{self.theme_name}"
         )
+
+    def _brand_version_text(self) -> str:
+        version = self.updates.status.latest_branch or f"v{self.orchestrator.config.agent_version}"
+        return f"{self.orchestrator.config.agent_name} {version}"
+
+    def _check_update_in_thread(self, announce: bool) -> None:
+        status = self.updates.check()
+        self.call_from_thread(self._finish_update_check, status, announce)
+
+    def _finish_update_check(self, status, announce: bool) -> None:
+        self.query_one("#brand", Label).update(self._brand_version_text())
+        self._refresh_status()
+        if status.state == "available":
+            self._write_system(f"Ulysses update available from GitHub main: {status.summary()}\nRun /update install to apply it.")
+        elif announce:
+            self._write_system(status.error or f"Ulysses update status: {status.summary()}")
+
+    def _install_update_in_thread(self) -> None:
+        message = self.updates.install()
+        self.call_from_thread(self._finish_update_install, message)
+
+    def _finish_update_install(self, message: str) -> None:
+        self._stop_waiting()
+        if self.updates.status.error:
+            self._write_error(message)
+        else:
+            self._write_system(message)
+        self._refresh_status()
 
     def _maybe_autonomous(self) -> None:
         self._start_autonomous_check(force=False)
