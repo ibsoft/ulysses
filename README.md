@@ -18,6 +18,8 @@ The project also contains Sirina, the reusable local speech toolkit that powers 
 - Keeps an in-session composer history: Up recalls older submitted entries, Down moves forward, and returning past the
   newest entry restores the unfinished draft.
 - Loads built-in and local skills through a registry.
+- Runs single or batched internet searches with ranked, deduplicated, source-linked results and bounded automatic
+  correction when a model emits malformed tool arguments.
 - Creates persistent specialist sub-agents with isolated prompts, workspaces, files, and task histories; delegates jobs in
   the background and incorporates completed reports into later answers while the main chat remains available.
 - Executes local commands only through a policy-controlled runner with confirmations, denylists, timeouts, output caps, environment filtering, and audit logs.
@@ -43,35 +45,68 @@ tests/                   Agent, API, speech, memory, and config tests
 var/ulysses/             Local runtime data used by the default config
 ```
 
+## Internet Search
+
+The built-in `internet_search` skill performs source-linked web research. It supports one query or a batch of up to six
+independent queries, ranks and deduplicates results, rejects unusable result URLs, and groups batched output by query.
+When a model emits malformed tool-call JSON, Ulysses sends an internal correction result back to the provider and retries
+within a fixed bound instead of exposing a parser exception or stopping immediately.
+
+Ask naturally for one search:
+
+```text
+Search for the current official OWASP guidance for IDOR and summarize the primary source.
+```
+
+For related searches, ask Ulysses to batch them:
+
+```text
+Search for public subdomain and IP-address evidence for egt.gr and bizcore.gr. Group and summarize results by domain.
+```
+
+The tool schema uses `query` for one search and `queries` for up to six searches. Domain-discovery wording adds targeted
+site and certificate-transparency search variants. Search results are passive public-source evidence and may be incomplete;
+they do not prove that every subdomain or address has been identified. Authorized assessments should correlate search
+results with DNS resolution, certificate-transparency data, and approved discovery tools.
+
+Restart Ulysses after upgrading, press `F6`, and verify that `internet_search` is enabled. Then submit the batched example
+above. The status view should briefly show `Using: internet_search`, and the final response should contain grouped source
+links without raw JSON-parser or backend diagnostics.
+
 ## Persistent Sub-agents
 
 Ulysses can create a persistent specialist when a user request or complex task benefits from independent work. Creation,
-delegation, inspection, and deletion are exposed only as Ulysses tools; there is no direct user slash command that bypasses
-the supervisor. Ask naturally, for example: `Create a persistent TLS specialist and have it review this evidence.`
+capability updates, delegation, inspection, and deletion are exposed only as Ulysses tools; there is no direct user slash
+command that bypasses the supervisor. Ask naturally, for example:
+`Create a persistent TLS specialist and have it review this evidence.`
 
 Delegation is asynchronous. Ulysses returns after assigning the job, the composer remains available, and the sub-agent
 runs against the currently configured provider. The TUI polls for completion or failure reports and posts a concise
 supervisor update automatically; a report racing with a user message is instead injected into that answer. The sidebar and `F5`
 status show counts plus a `Delegated jobs` list with each responsible agent, shortened task, and current state. Active jobs
-are shown before recent completed or failed work. `F6` lists the four supervisor tools:
+are shown before recent completed or failed work. Granted skills and the skill currently executing appear with the job.
+`F6` marks every registered skill as `Ulysses only` or `Ulysses + sub-agents` and lists five supervisor tools:
 
-- `subagent_create`: create a named persistent agent with a purpose and complete prompt.
-- `subagent_delegate`: assign a bounded background job and optional parent context.
+- `subagent_create`: create a named persistent agent with a purpose, prompt, and minimum skill allowlist.
+- `subagent_update`: replace an existing agent's purpose, prompt, or skill allowlist.
+- `subagent_delegate`: assign a bounded background job, optional context, and a subset of the agent's allowed skills.
 - `subagent_jobs`: list agents and job states.
 - `subagent_delete`: permanently remove an idle agent after typed confirmation.
 
 Persistent state is stored under `var/ulysses/subagents/<agent>/` with `agent.json`, `prompt.md`, `workspace/`, `files/`,
-and per-job request, metadata, and response files under `tasks/`. Installer upgrades preserve this runtime directory.
-Sub-agents report only to Ulysses. Their tools can list, read, and write UTF-8 files only inside their own workspace; they
-cannot create peers, run shell commands, handle sudo or secrets, bypass command policy, or answer the user directly.
+and per-job request, metadata, response, and delegated-skill audit files under `tasks/`. Installer upgrades preserve this
+runtime directory. Sub-agents report only to Ulysses. Workspace tools are always confined. Additional skills must be
+allowed globally, persisted on the agent, and granted to the individual job. Existing agents migrate as workspace-only.
+Sub-agents cannot create peers, run shell commands, approve confirmations, handle sudo or secrets, bypass command policy,
+or answer the user directly.
 Before creating or delegating, the default prompt requires Ulysses to call `subagent_jobs`, reuse a suitable persistent
 agent, and avoid duplicate active assignments. This lookup occurs only for sub-agent workflows; the complete agent catalog
 is not added to unrelated conversation turns.
 
 ### Sub-agent Smoke Test
 
-Restart Ulysses after an upgrade, press `F6`, and confirm that `subagent_create`, `subagent_delegate`, `subagent_jobs`, and
-`subagent_delete` are listed. Then send this request in normal chat:
+Restart Ulysses after an upgrade, press `F6`, and confirm that `subagent_create`, `subagent_update`,
+`subagent_delegate`, `subagent_jobs`, and `subagent_delete` are listed. Then send this request in normal chat:
 
 ```text
 Create a persistent sub-agent named test_researcher. Its purpose is to summarize bounded technical notes. Give it a
@@ -86,6 +121,16 @@ Expected behavior:
 3. Ulysses posts a concise completion update automatically. Ask `Show the jobs for test_researcher` to inspect history.
 4. Restart Ulysses and ask `List my persistent sub-agents`; `test_researcher` and its prior job should still exist.
 5. Ask `Delete test_researcher`. Enter `/confirm <token>` using the displayed token. Deletion is refused while a job is active.
+
+To test delegated search, say:
+
+```text
+Update test_researcher so its allowed skills contain only internet_search. Then delegate a job that uses internet_search
+to find the current official MCP Python SDK documentation and report the source URL. Grant only internet_search to the job.
+```
+
+`F5` should show `Skills: internet_search` and briefly `Using: internet_search`. `F6` should label `internet_search` as
+`Ulysses + sub-agents`; supervisor and command skills remain `Ulysses only`.
 
 For a development checkout, run the focused automated tests with:
 
@@ -212,7 +257,9 @@ requires HTTPS except for loopback development endpoints. Bearer tokens are ente
 untrusted external data. Per-server confirmation policy, risk level, timeouts, catalog limits, output caps, and artifacts
 remain enforced. One unavailable server is isolated and does not stop Ulysses or other MCP servers.
 
-Sub-agents do not inherit MCP tools. Ulysses remains the supervisor and may use MCP output when composing the final answer.
+Sub-agents do not inherit MCP tools. Explicit MCP delegation additionally requires `subagents.allow_mcp: true`, an exact
+global, agent, and job grant, an allowed risk level, and a tool call that does not request confirmation. It remains off by
+default. Ulysses remains the supervisor and may use MCP output when composing the final answer.
 See [the full MCP configuration and test guide](docs/ULYSSES.md#mcp-servers).
 
 ## Connectors

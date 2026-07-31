@@ -11,14 +11,17 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from .capabilities import SubagentCapabilityError, SubagentSkillBroker
+
 NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 
 
 class SubagentManager:
-    def __init__(self, config, provider_factory: Callable[[], Any]) -> None:
+    def __init__(self, config, provider_factory: Callable[[], Any], skill_registry=None, logger=None) -> None:
         self.config = config
         self.root = Path(config.root_dir).expanduser().resolve()
         self.provider_factory = provider_factory
+        self.capabilities = SubagentSkillBroker(config, skill_registry, logger)
         self._lock = RLock()
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, int(config.max_concurrent_jobs)),
@@ -27,12 +30,23 @@ class SubagentManager:
         self.root.mkdir(parents=True, exist_ok=True)
         self._recover_interrupted_jobs()
 
-    def create(self, name: str, purpose: str, prompt: str) -> dict[str, Any]:
+    def reconfigure(self, config) -> None:
+        self.config = config
+        self.capabilities.config = config
+
+    def create(
+        self,
+        name: str,
+        purpose: str,
+        prompt: str,
+        allowed_skills: list[str] | None = None,
+    ) -> dict[str, Any]:
         name = self._valid_name(name)
         purpose = purpose.strip()
         prompt = prompt.strip()
         if not purpose or not prompt:
             raise ValueError("Sub-agent purpose and prompt are required.")
+        grants = self.capabilities.validate_grants(allowed_skills or [])
         with self._lock:
             if len(self.list_agents()) >= int(self.config.max_agents):
                 raise ValueError("The configured sub-agent limit has been reached.")
@@ -43,10 +57,45 @@ class SubagentManager:
             agent_dir.mkdir(parents=True)
             for child in ("workspace", "files", "tasks"):
                 (agent_dir / child).mkdir()
-            record = {"name": name, "purpose": purpose, "created_at": now, "updated_at": now}
+            record = {
+                "name": name,
+                "purpose": purpose,
+                "allowed_skills": grants,
+                "created_at": now,
+                "updated_at": now,
+            }
             self._write_json(agent_dir / "agent.json", record)
             (agent_dir / "prompt.md").write_text(prompt + "\n", encoding="utf-8")
             return record
+
+    def update(
+        self,
+        name: str,
+        purpose: str | None = None,
+        prompt: str | None = None,
+        allowed_skills: list[str] | None = None,
+    ) -> dict[str, Any]:
+        name = self._valid_name(name)
+        agent_dir = self._agent_dir(name)
+        path = agent_dir / "agent.json"
+        if not path.is_file():
+            raise KeyError(f"Sub-agent `{name}` does not exist.")
+        grants = None if allowed_skills is None else self.capabilities.validate_grants(allowed_skills)
+        with self._lock:
+            record = self._read_json(path)
+            if purpose is not None:
+                if not purpose.strip():
+                    raise ValueError("Sub-agent purpose cannot be empty.")
+                record["purpose"] = purpose.strip()
+            if prompt is not None:
+                if not prompt.strip():
+                    raise ValueError("Sub-agent prompt cannot be empty.")
+                (agent_dir / "prompt.md").write_text(prompt.strip() + "\n", encoding="utf-8")
+            if grants is not None:
+                record["allowed_skills"] = grants
+            record["updated_at"] = self._now()
+            self._write_json(path, record)
+        return record
 
     def delete(self, name: str) -> None:
         name = self._valid_name(name)
@@ -72,7 +121,13 @@ class SubagentManager:
                 continue
         return agents
 
-    def delegate(self, name: str, task: str, context: str = "") -> dict[str, Any]:
+    def delegate(
+        self,
+        name: str,
+        task: str,
+        context: str = "",
+        skills: list[str] | None = None,
+    ) -> dict[str, Any]:
         name = self._valid_name(name)
         task = task.strip()
         if not task:
@@ -80,6 +135,13 @@ class SubagentManager:
         agent_dir = self._agent_dir(name)
         if not (agent_dir / "agent.json").is_file():
             raise KeyError(f"Sub-agent `{name}` does not exist.")
+        agent = self._read_json(agent_dir / "agent.json")
+        agent_skills = list(agent.get("allowed_skills") or [])
+        requested_skills = agent_skills if skills is None else skills
+        grants = self.capabilities.validate_grants(requested_skills)
+        outside_agent_policy = sorted(set(grants) - set(agent_skills))
+        if outside_agent_policy:
+            raise ValueError("Job requested skills outside the sub-agent policy: " + ", ".join(outside_agent_policy))
         job_id = f"job_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
         job_dir = self._confined(agent_dir / "tasks" / job_id, agent_dir / "tasks")
         job_dir.mkdir(parents=True)
@@ -88,6 +150,9 @@ class SubagentManager:
             "agent": name,
             "task": task,
             "context": context.strip(),
+            "granted_skills": grants,
+            "skill_calls": 0,
+            "active_skill": None,
             "status": "queued",
             "created_at": self._now(),
             "updated_at": self._now(),
@@ -157,6 +222,11 @@ class SubagentManager:
                 task = task[: max(1, max_task_chars - 3)].rstrip() + "..."
             lines.append(f"[{job.get('status', 'unknown')}] {job.get('agent', 'unknown')}")
             lines.append(f"  {task or 'No task description'}")
+            grants = list(job.get("granted_skills") or [])
+            if grants:
+                lines.append(f"  Skills: {', '.join(grants)}")
+            if job.get("active_skill"):
+                lines.append(f"  Using: {job['active_skill']}")
         remaining = max(0, len(jobs) - len(selected))
         if remaining:
             lines.append(f"  +{remaining} more")
@@ -191,7 +261,8 @@ class SubagentManager:
                     f"You are the persistent sub-agent `{name}` and report only to Ulysses.\n\n{prompt}\n\n"
                     "Complete the assigned job and return a concise completion report with outcome, evidence, files created, "
                     "uncertainties, and recommended next steps. Do not address the end user. You cannot create or delegate agents, "
-                    "run shell commands, or access files outside your workspace. Use workspace tools when useful."
+                    "run shell commands, approve confirmations, or access files outside your workspace. Use workspace tools and "
+                    "only the explicitly delegated Ulysses skills when useful."
                 ),
             },
             {
@@ -199,7 +270,9 @@ class SubagentManager:
                 "content": f"Assigned by Ulysses:\n{job['task']}\n\nParent context:\n{job.get('context') or 'None supplied.'}",
             },
         ]
-        tools = self._workspace_schemas()
+        granted_skills = list(job.get("granted_skills") or [])
+        tools = [*self._workspace_schemas(), *self.capabilities.schemas(granted_skills)]
+        skill_calls = int(job.get("skill_calls") or 0)
         provider = self.provider_factory()
         for _ in range(max(1, int(self.config.max_tool_rounds))):
             response = provider.complete(messages, tools=tools)
@@ -214,15 +287,40 @@ class SubagentManager:
             for index, call in enumerate(calls):
                 function = call.get("function") or {}
                 call_id = call.get("id") or f"workspace_{index}"
+                tool_name = str(function.get("name") or "")
                 try:
                     arguments = json.loads(function.get("arguments") or "{}")
-                    result = self._workspace_tool(workspace, function.get("name", ""), arguments)
+                    if tool_name in SubagentSkillBroker.WORKSPACE_TOOLS:
+                        result = self._workspace_tool(workspace, tool_name, arguments)
+                    else:
+                        if skill_calls >= int(self.config.max_skill_calls_per_job):
+                            raise SubagentCapabilityError("The delegated skill-call limit has been reached.")
+                        skill_calls += 1
+                        job["skill_calls"] = skill_calls
+                        self._set_active_skill(job, tool_name)
+                        try:
+                            result, event = self.capabilities.execute(
+                                tool_name,
+                                arguments,
+                                agent=name,
+                                job_id=job["id"],
+                                granted_skills=granted_skills,
+                            )
+                        finally:
+                            self._set_active_skill(job, None)
+                        self._record_skill_call(name, job["id"], event)
+                        job["updated_at"] = self._now()
+                        self._write_json(self._job_dir(name, job["id"]) / "job.json", job)
                 except Exception as exc:  # noqa: BLE001 - return tool errors to the sub-agent for recovery
-                    result = f"Workspace tool failed: {exc}"
-                messages.append(
-                    {"role": "tool", "tool_call_id": call_id, "name": function.get("name", ""), "content": result}
-                )
-        raise RuntimeError("Sub-agent exceeded its workspace tool-round limit.")
+                    result = f"Sub-agent tool failed: {exc}"
+                    if tool_name not in SubagentSkillBroker.WORKSPACE_TOOLS:
+                        self._record_skill_call(
+                            name,
+                            job["id"],
+                            {"skill": tool_name, "ok": False, "error": str(exc)[:500]},
+                        )
+                messages.append({"role": "tool", "tool_call_id": call_id, "name": tool_name, "content": result})
+        raise RuntimeError("Sub-agent exceeded its tool-round limit.")
 
     def _workspace_tool(self, workspace: Path, name: str, arguments: dict[str, Any]) -> str:
         relative = str(arguments.get("path") or ".")
@@ -244,6 +342,17 @@ class SubagentManager:
             path.write_text(content, encoding="utf-8")
             return f"Wrote {len(content)} characters to {path.relative_to(workspace).as_posix()}."
         raise ValueError(f"Unknown workspace tool `{name}`.")
+
+    def _record_skill_call(self, agent: str, job_id: str, event: dict[str, Any]) -> None:
+        record = {"timestamp": self._now(), **event}
+        path = self._job_dir(agent, job_id) / "skill-calls.jsonl"
+        with self._lock, path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n")
+
+    def _set_active_skill(self, job: dict[str, Any], skill: str | None) -> None:
+        job["active_skill"] = skill
+        job["updated_at"] = self._now()
+        self._write_json(self._job_dir(job["agent"], job["id"]) / "job.json", job)
 
     @staticmethod
     def _workspace_schemas() -> list[dict[str, Any]]:

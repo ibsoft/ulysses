@@ -18,6 +18,22 @@ def test_duckduckgo_parsing():
     assert results == [{"title": "A", "url": "https://a", "snippet": "snippet", "timestamp": "2026-01-01"}]
 
 
+def test_search_result_normalization_decodes_redirects_and_drops_relative_urls():
+    results = normalize_results(
+        [
+            {"title": "invalid", "href": "/relative"},
+            {
+                "title": "valid",
+                "href": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.test%2Ffinding",
+            },
+        ]
+    )
+
+    assert results == [
+        {"title": "valid", "url": "https://example.test/finding", "snippet": "", "timestamp": ""}
+    ]
+
+
 def test_duckduckgo_empty_results_are_not_blank(monkeypatch):
     def no_results(query, limit):
         return []
@@ -48,6 +64,51 @@ def test_duckduckgo_falls_back_to_next_provider(monkeypatch):
     assert result.ok
     assert "Security News" in result.content
     assert "_search_with_ddgs('latest security news'): primary failed" in result.data["errors"]
+
+
+def test_internet_search_groups_multiple_queries(monkeypatch):
+    def search(query, limit):
+        return [{"title": query, "href": f"https://example.test/{len(query)}", "body": "Source result."}]
+
+    monkeypatch.setattr(search_module, "_search_with_ddgs", search)
+    monkeypatch.setattr(search_module, "_search_with_duckduckgo_search", search)
+    monkeypatch.setattr(search_module, "_search_duckduckgo_html", search)
+
+    result = DuckDuckGoSearchSkill().run(
+        {"queries": ["security egt.gr", "security bizcore.gr"], "limit": 3},
+        {},
+    )
+
+    assert result.ok
+    assert "Search: security egt.gr" in result.content
+    assert "Search: security bizcore.gr" in result.content
+    assert result.data["queries"] == ["security egt.gr", "security bizcore.gr"]
+    assert {item["query"] for item in result.data["results"]} == {
+        "security egt.gr",
+        "security bizcore.gr",
+    }
+
+
+def test_internet_search_expands_domain_discovery_queries(monkeypatch):
+    attempted = []
+
+    def search(query, limit):
+        attempted.append(query)
+        return []
+
+    monkeypatch.setattr(search_module, "_search_with_ddgs", search)
+    monkeypatch.setattr(search_module, "_search_with_duckduckgo_search", search)
+    monkeypatch.setattr(search_module, "_search_duckduckgo_html", search)
+
+    DuckDuckGoSearchSkill().run(
+        {"query": "find subdomains and IP addresses of egt.gr and bizcore.gr"},
+        {},
+    )
+
+    assert "site:egt.gr -www" in attempted
+    assert 'site:crt.sh "egt.gr"' in attempted
+    assert "site:bizcore.gr -www" in attempted
+    assert 'site:crt.sh "bizcore.gr"' in attempted
 
 
 def test_command_confirmation(tmp_path):
@@ -130,7 +191,9 @@ def test_godmode_sudo_skips_token_but_requires_password(tmp_path):
     proposal = skill.run({"command": "sudo id"}, {})
 
     assert proposal.requires_confirmation
-    assert "sudo password" in proposal.content.lower() or "sudo password" in (proposal.confirmation_prompt or "").lower()
+    assert (
+        "sudo password" in proposal.content.lower() or "sudo password" in (proposal.confirmation_prompt or "").lower()
+    )
     assert proposal.confirmation_token
 
 
@@ -165,7 +228,10 @@ def test_create_skill_scaffolds_reviewable_skill(tmp_path):
 def test_registry_loads_external_skill(tmp_path):
     creator = CreateSkillSkill(tmp_path / "skills")
     proposal = creator.run({"name": "Echo", "request": "Echo input"}, {})
-    creator.run({"name": "Echo", "request": "Echo input", "confirmed": True, "confirmation_text": proposal.confirmation_token}, {})
+    creator.run(
+        {"name": "Echo", "request": "Echo input", "confirmed": True, "confirmation_text": proposal.confirmation_token},
+        {},
+    )
     registry = SkillRegistry()
     loaded = registry.load_external(tmp_path / "skills")
     assert loaded == ["echo"]
@@ -259,7 +325,7 @@ class GeneratedSkillProvider:
     def complete(self, messages, tools=None):
         self.messages.append(messages)
         prompt = messages[-1]["content"]
-        source = '''from __future__ import annotations
+        source = """from __future__ import annotations
 from typing import Any
 from sirina_agent.skills.base import SkillManifest, SkillResult
 
@@ -278,7 +344,7 @@ class SkillImpl:
         if not value:
             return SkillResult(False, "Input is required.")
         return SkillResult(True, f"Echo: {value}", {"input": value})
-'''
+"""
         if "Design metadata" in prompt:
             content = json.dumps(
                 {
@@ -366,12 +432,12 @@ def test_orchestrator_researches_builds_activates_and_loads_skill(tmp_path):
 
 
 def test_generated_skill_rejects_unsafe_imports():
-    source = '''
+    source = """
 import subprocess
 class SkillImpl:
     def run(self, arguments, context):
         return None
-'''
+"""
 
     try:
         validate_generated_skill_source(source)
@@ -382,7 +448,7 @@ class SkillImpl:
 
 
 def test_generated_skill_rejects_invalid_manifest_field():
-    source = '''
+    source = """
 from sirina_agent.skills.base import SkillManifest, SkillResult
 class SkillImpl:
     manifest = SkillManifest(
@@ -395,7 +461,7 @@ class SkillImpl:
     )
     def run(self, arguments, context):
         return SkillResult(True, "ok")
-'''
+"""
 
     try:
         validate_generated_skill_source(source)
@@ -406,7 +472,7 @@ class SkillImpl:
 
 
 def test_generated_skill_rejects_invalid_skill_result_fields():
-    source = '''
+    source = """
 from sirina_agent.skills.base import SkillManifest, SkillResult
 class SkillImpl:
     manifest = SkillManifest(
@@ -419,7 +485,7 @@ class SkillImpl:
     )
     def run(self, arguments, context):
         return SkillResult(success=True, result={"status": "ok"})
-'''
+"""
 
     try:
         validate_generated_skill_source(source)

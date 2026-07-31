@@ -1426,6 +1426,8 @@ class UlyssesTextualApp(App):
             if not self.orchestrator.sync_command_policy_from_config(force=True):
                 raise RuntimeError("command policy synchronization failed")
             loaded = self.orchestrator.skills.load_external(self.orchestrator.config.skills.skills_dir)
+            if self.orchestrator.subagents:
+                self.orchestrator.subagents.reconfigure(self.orchestrator.config.subagents)
             if self.orchestrator.mcp:
                 self.orchestrator.mcp.reconfigure(self.orchestrator.config.mcp)
             self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
@@ -1442,7 +1444,14 @@ class UlyssesTextualApp(App):
     def action_skills(self) -> None:
         lines = []
         for manifest in self.orchestrator.skills.manifests():
-            lines.append(f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}  status=ready")
+            scope = (
+                "Ulysses + sub-agents"
+                if self.orchestrator.subagents and self.orchestrator.subagents.capabilities.is_delegable(manifest.name)
+                else "Ulysses only"
+            )
+            lines.append(
+                f"{manifest.name}  risk={manifest.risk_level}  enabled={manifest.enabled}  scope={scope}  status=ready"
+            )
         for name, manifest, error in self.orchestrator.skills.load_failures():
             details = f"risk={manifest.risk_level}  enabled={manifest.enabled}" if manifest else "manifest=unavailable"
             lines.append(f"{name}  {details}  status=load_failed: {error}")
