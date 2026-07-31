@@ -638,7 +638,7 @@ class RichTUI:
         )
         try:
             with self.console.status("[bold cyan]Verifying Telegram bot...[/bold cyan]", spinner="dots"):
-                username = candidate.validate()
+                candidate.validate()
             apply_telegram_setup(self.orchestrator.config, self.orchestrator.config_path, TelegramSetup(True, token))
             load_env_file(env_path_for_config(self.orchestrator.config_path))
             self.orchestrator.config = load_config(self.orchestrator.config_path)
@@ -651,7 +651,7 @@ class RichTUI:
         self.connectors.replace(candidate)
         self.console.print(
             Panel(
-                f"Bot: @{username}\nSend [bold]/verify {code}[/bold] to the bot within "
+                f"Send [bold]/verify {code}[/bold] to the bot within "
                 f"{candidate.config.pairing_code_ttl_seconds // 60} minutes.",
                 title="Telegram connector",
             )

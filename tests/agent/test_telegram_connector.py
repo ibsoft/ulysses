@@ -149,8 +149,10 @@ def test_connector_manager_supports_multiple_connector_lifecycles():
     manager.start_all()
 
     assert len(manager.statuses()) == 2
-    assert "Telegram: online" in manager.summary()
-    assert "Future Chat: online" in manager.summary()
+    assert "Telegram: on" in manager.summary()
+    assert "Future Chat: on" in manager.summary()
+    assert "verified" not in manager.summary()
+    assert "online" not in manager.summary()
 
     manager.stop_all()
     assert events == [

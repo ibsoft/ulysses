@@ -1635,11 +1635,11 @@ class UlyssesTextualApp(App):
             return
         self.call_from_thread(self._activate_telegram_connector, candidate, username, code)
 
-    def _activate_telegram_connector(self, connector: TelegramConnector, username: str, code: str) -> None:
+    def _activate_telegram_connector(self, connector: TelegramConnector, _username: str, code: str) -> None:
         self.connectors.replace(connector)
         self._stop_waiting()
         self._write_system(
-            f"Telegram connector verified: @{username}\n"
+            "Telegram connector verified.\n"
             f"Open the bot and send: /verify {code}\n"
             f"Pairing code expires in {connector.config.pairing_code_ttl_seconds // 60} minutes."
         )
@@ -1958,6 +1958,7 @@ class UlyssesTextualApp(App):
         if self.voice_io:
             state = self.voice_io.state
             voice = f"{'on' if state.enabled else 'off'} / muted={state.muted} / stt={state.stt} / tts={state.tts}"
+        connector_state = "on" if any(status.configured for status in self.connectors.statuses()) else "off"
         autonomous = "on" if self.orchestrator.autonomous_enabled() else "off"
         active_skill = getattr(self.orchestrator, "active_skill", None) or "none"
         context = self.orchestrator.context_usage()
@@ -1968,10 +1969,10 @@ class UlyssesTextualApp(App):
             f"Context\n{gauge} {context['percent']}%\n"
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
+            f"Connector: {connector_state}\n\n"
             f"Active skill\n{active_skill}\n\n"
             f"Sub-agents\n{self.orchestrator.subagents.status_detail() if self.orchestrator.subagents else 'disabled'}\n\n"
             f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
-            f"Connectors\n{self.connectors.summary()}\n\n"
             f"Autonomous\n{autonomous}\n\n"
             f"Update\n{self.updates.status.state}\n\n"
             f"Theme\n{self.theme_name}"
