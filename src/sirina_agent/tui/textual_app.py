@@ -959,7 +959,13 @@ class UlyssesTextualApp(App):
             self.query_one("#composer", Input).focus()
         text = self._clipboard_text()
         if not text:
-            self._write_system("Clipboard is empty or unavailable.")
+            if _system_clipboard_backend() is None:
+                self._write_system(
+                    "System clipboard access is unavailable. Use Ctrl+Shift+V for terminal paste, "
+                    "or install xclip on X11 / wl-clipboard on Wayland to enable Ctrl+V."
+                )
+            else:
+                self._write_system("Clipboard is empty.")
             return
         self._handle_composer_paste(text)
 
@@ -2159,22 +2165,47 @@ def _gauge(percent: int, width: int = 14) -> str:
 
 
 def _system_clipboard_text() -> str:
-    commands = [
+    commands = (
         ["wl-paste", "--no-newline"],
         ["xclip", "-selection", "clipboard", "-o"],
         ["xsel", "--clipboard", "--output"],
         ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-    ]
+    )
     for command in commands:
-        if shutil.which(command[0]) is None:
+        executable = shutil.which(command[0])
+        if executable is None:
             continue
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=2, check=False)
-        except Exception:
+            result = subprocess.run(
+                [executable, *command[1:]],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode == 0 and result.stdout:
             return result.stdout.rstrip("\r\n")
     return ""
+
+
+def _system_clipboard_backend() -> str | None:
+    session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    candidates = (
+        ("wl-paste", "wayland"),
+        ("xclip", "x11"),
+        ("xsel", "x11"),
+        ("powershell.exe", "windows"),
+    )
+    for command, backend in candidates:
+        if backend == "wayland" and session_type == "x11":
+            continue
+        if backend == "x11" and session_type == "wayland" and not os.environ.get("DISPLAY"):
+            continue
+        if shutil.which(command):
+            return command
+    return None
 
 
 _clipboard_owner_process: subprocess.Popen[str] | None = None
