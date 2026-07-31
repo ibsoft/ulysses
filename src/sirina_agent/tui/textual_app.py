@@ -1441,7 +1441,7 @@ class UlyssesTextualApp(App):
         update_icon = "[green]✓[/green]" if update_ok else "[yellow]![/yellow]"
         subagents = self.orchestrator.subagents.summary() if self.orchestrator.subagents else "disabled"
         mcp = self.orchestrator.mcp.summary() if self.orchestrator.mcp else "disabled"
-        active_skill = getattr(self.orchestrator, "active_skill", None) or "none"
+        active_skill = getattr(self.orchestrator, "active_skill", None) or "idle"
         lines = [
             "[bold cyan]◆  ULYSSES SYSTEM STATUS[/bold cyan]",
             "[dim]Local runtime and capability overview[/dim]",
@@ -1456,7 +1456,7 @@ class UlyssesTextualApp(App):
             "[bold]CAPABILITIES[/bold]",
             _dashboard_line("Voice", voice, "ok" if voice != "off" else "off"),
             _dashboard_line("Connector", "on" if connector_on else "off", "ok" if connector_on else "off"),
-            _dashboard_line("Skill", active_skill, "ok" if active_skill != "none" else "off"),
+            _dashboard_line("Active skill", active_skill, "ok" if active_skill != "idle" else "off"),
             _dashboard_line("Sub-agents", subagents, "ok" if self.orchestrator.subagents else "off"),
             _dashboard_line("MCP", mcp, "ok" if self.orchestrator.mcp and mcp != "disabled" else "off"),
             _dashboard_line(
@@ -1989,7 +1989,7 @@ class UlyssesTextualApp(App):
             voice = f"{'on' if state.enabled else 'off'} / muted={state.muted} / stt={state.stt} / tts={state.tts}"
         connector_state = "on" if any(status.configured for status in self.connectors.statuses()) else "off"
         autonomous = "on" if self.orchestrator.autonomous_enabled() else "off"
-        active_skill = getattr(self.orchestrator, "active_skill", None) or "none"
+        active_skill = getattr(self.orchestrator, "active_skill", None) or "idle"
         context = self.orchestrator.context_usage()
         gauge = _gauge(context["percent"])
         self.query_one("#status", Static).update(

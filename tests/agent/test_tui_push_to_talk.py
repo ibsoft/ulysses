@@ -185,6 +185,8 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
         assert "CAPABILITIES" in report
         assert "SECURITY" in report
         assert "Connector:" in report
+        assert "Active skill:" in report and "idle" in report
+        assert "Godmode:" in report and "off" in report
         assert "Delegated jobs" not in report
         assert "Config path" not in report
 

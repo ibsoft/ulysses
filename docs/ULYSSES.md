@@ -265,7 +265,7 @@ Default skills:
   arguments trigger bounded internal correction attempts instead of exposing parser diagnostics to the operator.
 - `system_command`: allowlisted local command execution with confirmation, typed confirmation for high-risk commands, timeouts, output caps, environment filtering and audit logs.
 - `skills.command.bypass_confirmation_for_allowed_commands`: defaults to `true` and skips prompts for allowlisted non-high-risk commands.
-- `skills.command.godmode`: when set to `true`, gives full local command access. It bypasses the command allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, filtered environment, timeouts, output caps, and audit logging.
+- `skills.command.godmode`: off by default. When set to `true`, it gives full local command access. It bypasses the command allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, filtered environment, timeouts, output caps, and audit logging.
 - For multi-step system inspection requests, Ulysses plans separate commands, stores every output as tool history, and then produces one combined summary from the results.
 - `create_skill`: researches and generates complete local skills under `skills.skills_dir`. It requires typed confirmation before writing executable code, then enables and registers the skill live.
 
