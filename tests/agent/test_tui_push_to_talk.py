@@ -157,6 +157,8 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
     config.memory.sqlite_path = tmp_path / "sessions.sqlite3"
     config.memory.faiss_path = tmp_path / "memory.faiss"
     config.memory.metadata_path = tmp_path / "memory.jsonl"
+    config.updates.metadata_path = tmp_path / ".ulysses-build.json"
+    config.updates.metadata_path.write_text(json.dumps({"source_branch": "v_2.0.15"}), encoding="utf-8")
     sessions = SessionStore(config.memory.sqlite_path)
     memory = FaissMemoryStore(
         config.memory.faiss_path,
@@ -164,16 +166,17 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
         LocalHashEmbeddingProvider(64),
     )
     app = UlyssesTextualApp(AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry()))
-    app.updates.status = UpdateStatus("current", latest_branch="v_2.0.13")
-
     async with app.run_test(size=(80, 30)):
+        app.updates.status = UpdateStatus("available", latest_branch="v_2.0.16")
+        app._finish_update_check(app.updates.status, False)
         brand = str(app.query_one("#brand", Label).render())
         status = str(app.query_one("#status", Static).render())
 
-        assert brand == "Ulysses v_2.0.13"
+        assert brand == "Ulysses v_2.0.15 (update)"
         assert "Version\n" not in status
         assert "Latest branch\n" not in status
-        assert status.count("v_2.0.13") == 0
+        assert status.count("v_2.0.15") == 0
+        assert app.title == "Ulysses v_2.0.15 (update)"
 
 
 def test_top_header_includes_locally_installed_version(tmp_path):
