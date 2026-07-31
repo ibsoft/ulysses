@@ -295,8 +295,10 @@ Developers can publish source changes into an existing installation without rebu
 Each installation records the source branch and Git commit from the repository's `main` branch. On startup, Ulysses
 performs a bounded background `git ls-remote` check against the configured repository. It resolves the highest
 version-named branch and shows it as the latest release branch in the TUI. Update availability is determined only by
-comparing the installed `main` commit with remote `main`. If `main` has advanced, the sidebar and `/status` show the latest
-release branch and that an update is available, and the transcript displays one concise notification.
+comparing the commit actually installed with remote `main`, then comparing the installed version branch with the highest
+remote version branch. This avoids treating an older local release as current merely because `main` was already present in
+the installer's remote-tracking refs. If either the installed commit or version is behind, the sidebar and `/status` show
+that an update is available and the transcript displays one concise notification.
 
 The sidebar displays the version once, centered directly below the Ulysses logo. The remaining sidebar status shows only
 the update state so the version is not duplicated.
@@ -321,7 +323,8 @@ The updater first clones `main` into `~/.ulysses/update-stage` without changing 
 run `ulysses` again; the launcher applies the staged version with `--preserve-config` before the new process opens SQLite,
 memory, projects, or logs. It does not merge into the installed application or modify the active
 `~/.config/ulysses/ulysses.yaml`. Assessment projects, reports, sessions, memory, generated skills, connector state, logs,
-secrets, and downloaded models are preserved. `/update install` refuses to stage anything when remote `main` is current.
+secrets, and downloaded models are preserved. The staged release branch is retained as the installed version label even
+though code is fetched from `main`. `/update install` refuses to stage anything when both code and version are current.
 
 Update behavior is configurable:
 

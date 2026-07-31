@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPOSITORY_URL="${1:?repository URL is required}"
 BRANCH="${2:-main}"
+RELEASE_BRANCH="${3:-${BRANCH}}"
 APP_HOME="${ULYSSES_APP_HOME:-${HOME}/.ulysses}"
 STAGE_DIR="${APP_HOME}/update-stage"
 WORK_DIR="$(mktemp -d "${APP_HOME}/.update-stage.XXXXXX")"
@@ -12,6 +13,7 @@ git clone --quiet --depth 1 --branch "${BRANCH}" "${REPOSITORY_URL}" "${WORK_DIR
 test -x "${WORK_DIR}/source/scripts/install-ulysses-linux"
 printf '%s\n' "${REPOSITORY_URL}" >"${WORK_DIR}/repository"
 printf '%s\n' "${BRANCH}" >"${WORK_DIR}/branch"
+printf '%s\n' "${RELEASE_BRANCH}" >"${WORK_DIR}/release-branch"
 touch "${WORK_DIR}/ready"
 rm -rf "${STAGE_DIR}"
 mv "${WORK_DIR}" "${STAGE_DIR}"

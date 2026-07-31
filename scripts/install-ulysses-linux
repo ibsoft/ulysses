@@ -27,7 +27,7 @@ BIN_HOME="${HOME}/.local/bin"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 SOURCE_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse HEAD 2>/dev/null || true)"
-SOURCE_BRANCH="$(git -C "${PROJECT_ROOT}" branch --show-current 2>/dev/null || true)"
+SOURCE_BRANCH="${ULYSSES_RELEASE_BRANCH:-$(git -C "${PROJECT_ROOT}" branch --show-current 2>/dev/null || true)}"
 SOURCE_MAIN_COMMIT="$(git -C "${PROJECT_ROOT}" rev-parse refs/remotes/origin/main 2>/dev/null || true)"
 SOURCE_REPOSITORY_URL="$(git -C "${PROJECT_ROOT}" remote get-url origin 2>/dev/null || true)"
 if [[ -z "${SOURCE_MAIN_COMMIT}" ]]; then
@@ -340,7 +340,9 @@ set -euo pipefail
 UPDATE_STAGE="${APP_HOME}/update-stage"
 if [[ -f "\${UPDATE_STAGE}/ready" ]]; then
   printf 'Applying staged Ulysses update with configuration preservation...\n'
-  if "\${UPDATE_STAGE}/source/scripts/install-ulysses-linux" --preserve-config; then
+  RELEASE_BRANCH="\$(cat "\${UPDATE_STAGE}/release-branch" 2>/dev/null || printf 'main')"
+  if ULYSSES_RELEASE_BRANCH="\${RELEASE_BRANCH}" \
+    "\${UPDATE_STAGE}/source/scripts/install-ulysses-linux" --preserve-config; then
     rm -rf "\${UPDATE_STAGE}"
     printf 'Update applied. Starting Ulysses...\n'
   else

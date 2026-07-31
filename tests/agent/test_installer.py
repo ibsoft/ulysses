@@ -144,3 +144,4 @@ def test_updater_stages_checkout_without_running_installer(tmp_path):
     assert result.returncode == 0
     assert (app_home / "update-stage/ready").is_file()
     assert (app_home / "update-stage/source/scripts/install-ulysses-linux").is_file()
+    assert (app_home / "update-stage/release-branch").read_text(encoding="utf-8") == "main\n"
