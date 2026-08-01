@@ -56,6 +56,8 @@ def test_spoken_startup_brief_is_short_status_only(tmp_path):
 
     spoken = spoken_startup_brief(agent)
 
+    assert spoken.startswith("Ulysses Cyber Sentinel starting. Brain ")
+
     assert "Brain up." in spoken
     assert "LLM" not in spoken
     assert "Memory up." in spoken

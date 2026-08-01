@@ -12,6 +12,7 @@ class SkillManifest:
     required_permissions: list[str]
     risk_level: str
     enabled: bool = True
+    activity_label: str = "working"
 
     def __init__(
         self,
@@ -21,6 +22,7 @@ class SkillManifest:
         required_permissions: list[str] | None = None,
         risk_level: str = "low",
         enabled: bool = True,
+        activity_label: str = "working",
         *,
         parameters_schema: dict[str, Any] | None = None,
     ) -> None:
@@ -31,6 +33,7 @@ class SkillManifest:
         object.__setattr__(self, "required_permissions", required_permissions or [])
         object.__setattr__(self, "risk_level", risk_level)
         object.__setattr__(self, "enabled", enabled)
+        object.__setattr__(self, "activity_label", activity_label)
 
 
 @dataclass(init=False)

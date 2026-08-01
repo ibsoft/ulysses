@@ -28,3 +28,17 @@ async def test_sudo_dialog_uses_masked_input():
 
         assert field.password is True
         assert field.id == "sudo-password"
+
+
+@pytest.mark.anyio
+async def test_sudo_dialog_enter_submits_password():
+    app = PasswordHarness()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        field = app.password_screen.query_one("#sudo-password", Input)
+        field.value = "not-a-real-password"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.screen is not app.password_screen

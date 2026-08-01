@@ -65,12 +65,12 @@ class DuckDuckGoSearchSkill:
                     "maximum": 10,
                 },
             },
-            "anyOf": [{"required": ["query"]}, {"required": ["queries"]}],
             "additionalProperties": False,
         },
         required_permissions=["network"],
         risk_level="medium",
         enabled=True,
+        activity_label="searching",
     )
 
     def run(self, arguments: dict[str, Any], context: dict[str, Any]) -> SkillResult:

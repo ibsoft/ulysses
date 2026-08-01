@@ -82,7 +82,18 @@ class RichTUI:
     def run(self) -> None:
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self.console.print(Panel(f"{ULYSSES_LOGO}\n{boot_message}"))
-        self._speak(spoken_startup_brief(self.orchestrator, self.voice_io))
+        if not bool(getattr(self.orchestrator.llm, "configured", True)):
+            guidance = (
+                "No AI provider is configured. I will open provider setup now. Choose a provider and enter its "
+                "connection details or API key."
+            )
+            self.console.print(Panel(guidance, title="Provider setup required"))
+            self._speak(guidance)
+            self._setup_provider()
+        else:
+            greeting = self.orchestrator.startup_greeting()
+            self.console.print(Panel(greeting, title="Ulysses"))
+            self._speak(f"{spoken_startup_brief(self.orchestrator, self.voice_io)} {greeting}")
         self.connectors.start_all()
         if self.orchestrator.config.updates.enabled and self.orchestrator.config.updates.check_on_startup:
             status = self.updates.check()
@@ -507,6 +518,9 @@ class RichTUI:
             f"Provider saved and activated: {self.orchestrator.config.llm.provider} / "
             f"{self.orchestrator.config.llm.model}"
         )
+        question = "Provider setup is complete. How would you like me to address you?"
+        self.console.print(Panel(question, title="Ulysses"))
+        self._speak(question)
 
     def _setup_connectors(self) -> None:
         definitions = connector_definitions()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -84,7 +85,16 @@ class CommandPolicy:
         high_risk = executable in HIGH_RISK_TOKENS
         if any(part in {"|", "&&", "||", ";", ">", ">>", "<"} for part in argv):
             if self.godmode and isinstance(command, str):
-                return CommandDecision(True, ["bash", "-lc", command], "allowed by godmode", True, False, False, False)
+                contains_sudo = any(Path(part).name == "sudo" for part in argv)
+                return CommandDecision(
+                    True,
+                    ["bash", "-lc", command],
+                    "allowed by godmode",
+                    True,
+                    False,
+                    False,
+                    contains_sudo,
+                )
             return CommandDecision(False, argv, "shell control operators are not allowed", True)
         if executable == "sudo":
             requires_confirmation = not self.godmode
@@ -136,6 +146,14 @@ class CommandRunner:
         run_argv = list(argv)
         if Path(run_argv[0]).name == "sudo" and sudo_password is not None:
             run_argv = ["sudo", "-S", "-p", "", *run_argv[1:]]
+            input_text = sudo_password + "\n"
+        elif (
+            len(run_argv) >= 3
+            and Path(run_argv[0]).name in {"bash", "sh"}
+            and run_argv[1] in {"-c", "-lc"}
+            and sudo_password is not None
+        ):
+            run_argv[2] = re.sub(r"(?<!\S)(?:\S*/)?sudo(?=\s)", "sudo -S -p ''", run_argv[2])
             input_text = sudo_password + "\n"
         try:
             result = subprocess.run(

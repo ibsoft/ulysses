@@ -2,6 +2,8 @@ import json
 import time
 
 import pytest
+from rich.markdown import Markdown
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.events import Paste
@@ -17,6 +19,7 @@ from sirina_agent.tui.textual_app import (
     ComposerInput,
     UlyssesTextualApp,
     _boot_progress,
+    _formatted_transcript_content,
     _set_system_clipboard_text,
     _system_clipboard_backend,
     _system_clipboard_text,
@@ -289,3 +292,19 @@ def test_command_history_is_bounded_and_avoids_consecutive_duplicates():
     assert len(app._command_history) == 200
     assert app._command_history[0] == "command 5"
     assert app._command_history[-1] == "command 204"
+
+
+def test_transcript_renders_markdown_tables_and_preserves_plain_command_output():
+    table = "| Interface | State |\n|---|---|\n| lo | up |"
+
+    assert isinstance(_formatted_transcript_content(table), Markdown)
+    assert isinstance(_formatted_transcript_content("lo: flags=73<UP>\ninet 127.0.0.1"), Text)
+
+
+def test_activity_animation_uses_full_height_blocks():
+    assert UlyssesTextualApp.ACTIVITY_FRAMES[0] == "[█░░░░░]"
+    assert UlyssesTextualApp.ACTIVITY_FRAMES[-1] == "[██████]"
+    rendered = UlyssesTextualApp._activity_renderable("[██████]", "Ulysses: running")
+
+    assert rendered.plain == "[██████] Ulysses: running..."
+    assert str(rendered.spans[0].style) == "bold #ff8c00"

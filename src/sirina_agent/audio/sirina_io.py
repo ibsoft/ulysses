@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 SPEECH_SUMMARY_AFTER_CHARS = 260
@@ -51,7 +52,7 @@ class SirinaSpeechIO:
     def cancel_listen(self) -> None:
         self._listen_cancel.set()
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, on_playback_start: Callable[[], None] | None = None) -> None:
         if not self.state.enabled or self.state.muted:
             return
 
@@ -65,6 +66,7 @@ class SirinaSpeechIO:
                     voice=self.config.sirina.tts_voice,
                     normalize_text=self.config.sirina.normalize_tts_text,
                     output_device=self.config.audio.output_device,
+                    on_playback_start=on_playback_start,
                 )
             else:
                 from sirina.api import TextToSpeech
@@ -72,12 +74,28 @@ class SirinaSpeechIO:
                 tts = TextToSpeech(
                     voice=self.config.sirina.tts_voice, normalize_text=self.config.sirina.normalize_tts_text
                 )
+                if on_playback_start is None:
+                    try:
+                        tts.play(spoken_text, output_device=self.config.audio.output_device)
+                    except ValueError as exc:
+                        if "text is too long" not in str(exc):
+                            raise
+                        tts.play(summarize_for_speech(text, force=True), output_device=self.config.audio.output_device)
+                    return
                 try:
-                    tts.play(spoken_text, output_device=self.config.audio.output_device)
+                    audio = tts.synthesize(spoken_text)
                 except ValueError as exc:
                     if "text is too long" not in str(exc):
                         raise
-                    tts.play(summarize_for_speech(text, force=True), output_device=self.config.audio.output_device)
+                    audio = tts.synthesize(summarize_for_speech(text, force=True))
+                if on_playback_start:
+                    on_playback_start()
+                import sounddevice as sd  # type: ignore
+
+                from sirina.audio_io.sounddevice_io import get_output_device
+
+                sd.play(audio, tts.sample_rate, device=get_output_device(self.config.audio.output_device))
+                sd.wait()
         finally:
             self.state.tts = "idle"
 
@@ -104,8 +122,11 @@ class SirinaSpeechIO:
         voice: str,
         normalize_text: bool,
         output_device: str | int | None,
+        on_playback_start: Callable[[], None] | None = None,
     ) -> None:
         command = _speak_worker_command(voice, normalize_text, output_device)
+        if on_playback_start:
+            command.append("--signal-playback")
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -119,7 +140,15 @@ class SirinaSpeechIO:
         if interrupted and process.poll() is None:
             process.terminate()
         try:
-            process.communicate(input=text)
+            if on_playback_start and process.stdin is not None and process.stdout is not None:
+                process.stdin.write(text)
+                process.stdin.close()
+                process.stdin = None
+                if process.stdout.readline().strip() == "ULYSSES_PLAYBACK_READY":
+                    on_playback_start()
+                process.communicate()
+            else:
+                process.communicate(input=text)
         finally:
             with self._tts_process_lock:
                 if self._tts_process is process:

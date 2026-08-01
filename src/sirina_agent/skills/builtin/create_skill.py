@@ -34,6 +34,7 @@ class CreateSkillSkill:
         required_permissions=["write_skills_dir"],
         risk_level="high",
         enabled=True,
+        activity_label="constructing skill",
     )
 
     def __init__(self, skills_dir: Path) -> None:

@@ -13,6 +13,13 @@ from sirina_agent.skills.builtin.system_command import SystemCommandSkill
 from sirina_agent.skills.registry import SkillRegistry
 
 
+def test_internet_search_schema_is_openai_function_compatible():
+    schema = DuckDuckGoSearchSkill.manifest.arguments_schema
+
+    assert schema["type"] == "object"
+    assert not ({"oneOf", "anyOf", "allOf", "enum", "const", "not"} & schema.keys())
+
+
 def test_duckduckgo_parsing():
     results = normalize_results([{"title": "A", "href": "https://a", "body": "snippet", "date": "2026-01-01"}])
     assert results == [{"title": "A", "url": "https://a", "snippet": "snippet", "timestamp": "2026-01-01"}]
@@ -195,6 +202,16 @@ def test_godmode_sudo_skips_token_but_requires_password(tmp_path):
         "sudo password" in proposal.content.lower() or "sudo password" in (proposal.confirmation_prompt or "").lower()
     )
     assert proposal.confirmation_token
+
+
+def test_godmode_compound_sudo_requires_secure_password(tmp_path):
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], godmode=True)
+    skill = SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000))
+
+    proposal = skill.run({"command": "sudo apt update && sudo apt upgrade -y"}, {})
+
+    assert proposal.requires_confirmation
+    assert proposal.data["sudo_password_required"]
 
 
 def test_sudo_password_is_not_exposed_to_llm_tool_schema(tmp_path):

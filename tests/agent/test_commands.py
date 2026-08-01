@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 from sirina_agent.config.models import UlyssesConfig
 from sirina_agent.security.commands import CommandPolicy, CommandRunner
@@ -35,6 +36,15 @@ def test_godmode_allows_non_allowlisted_and_denied_commands_with_confirmation(tm
     assert sudo.sudo_password_required
     assert not sudo.requires_confirmation
     assert not sudo.requires_typed_confirmation
+
+
+def test_godmode_detects_sudo_inside_compound_shell_command(tmp_path):
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], godmode=True)
+
+    decision = policy.evaluate("sudo apt update && sudo apt upgrade -y")
+
+    assert decision.argv == ["bash", "-lc", "sudo apt update && sudo apt upgrade -y"]
+    assert decision.sudo_password_required
 
 
 def test_default_policy_allows_pentest_tools_and_flags_intrusive_ones(tmp_path):
@@ -91,6 +101,31 @@ def test_command_runner(tmp_path):
     result = CommandRunner(policy, logging.getLogger("test"), 2, 1000).run(["pwd"])
     assert result["returncode"] == 0
     assert str(tmp_path) in result["stdout"]
+
+
+def test_command_runner_supplies_password_to_nested_sudo_without_terminal_prompt(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("sirina_agent.security.commands.subprocess.run", fake_run)
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], godmode=True)
+    runner = CommandRunner(policy, logging.getLogger("test"), 2, 1000)
+
+    result = runner.run(["bash", "-lc", "sudo apt update && sudo apt upgrade -y"], sudo_password="secret")
+
+    assert result["returncode"] == 0
+    assert captured["argv"] == [
+        "bash",
+        "-lc",
+        "sudo -S -p '' apt update && sudo -S -p '' apt upgrade -y",
+    ]
+    assert captured["input"] == "secret\n"
+    assert captured["capture_output"] is True
+    assert captured["shell"] is False
 
 
 def test_command_runner_reports_missing_executable(tmp_path):

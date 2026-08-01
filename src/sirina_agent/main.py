@@ -6,7 +6,7 @@ from pathlib import Path
 from .audio.sirina_io import SirinaSpeechIO
 from .config import load_config
 from .core.orchestrator import AgentOrchestrator
-from .llm.providers import build_provider
+from .llm.providers import UnconfiguredProvider, build_provider
 from .mcp import MCPManager
 from .memory.store import FaissMemoryStore, LocalHashEmbeddingProvider
 from .security.commands import CommandPolicy, CommandRunner
@@ -68,11 +68,15 @@ def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrato
         skills.register(SubagentJobsSkill(subagents))
         skills.register(DeleteSubagentSkill(subagents))
     mcp = MCPManager(config.mcp, skills, audit_logger(config.logging.directory))
+    try:
+        provider = build_provider(config.llm)
+    except RuntimeError as exc:
+        provider = UnconfiguredProvider(str(exc))
     orchestrator = AgentOrchestrator(
         config,
         sessions,
         memory,
-        build_provider(config.llm),
+        provider,
         skills,
         config_path,
         subagents,

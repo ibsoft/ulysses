@@ -14,6 +14,7 @@ from ..skills.builder import SkillBuildError, build_skill_spec
 
 
 MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
+VOICE_SEMANTIC_SUMMARY_AFTER_CHARS = 320
 
 
 class AgentOrchestrator:
@@ -126,6 +127,12 @@ class AgentOrchestrator:
 
     def _handle_text_locked(self, text: str) -> str:
         self._activity("checking request")
+        confirmation = text.strip().lower()
+        if self.pending_tool and confirmation in {"yes", "y", "confirm", "confirmed", "proceed", "go ahead"}:
+            return self._confirm_pending_tool_locked()
+        if self.pending_tool and confirmation in {"no", "n", "cancel", "stop", "abort"}:
+            self.cancel_pending_tool()
+            return "Pending command cancelled."
         direct_skill = self._direct_skill_creation(text)
         if direct_skill:
             self.sessions.add_message(self.session_id, "user", text)
@@ -187,6 +194,28 @@ class AgentOrchestrator:
         response = self.llm.complete(messages, tools=tools)
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
+        if not tool_calls and self._is_command_assignment(text):
+            self._activity("requesting executable tool call")
+            messages.append({"role": "assistant", "content": message.get("content") or ""})
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "The user assigned an operational command task, but the previous answer only described it. "
+                        "Call system_command now with the concrete command needed to perform the task. Do not print, "
+                        "propose, simulate, or narrate a command. Do not claim execution without a tool call. Split "
+                        "compound shell expressions into separate system_command calls unless the exact compound "
+                        "command is required. The runtime will enforce policy and confirmation."
+                    ),
+                }
+            )
+            require_tool = getattr(self.llm, "complete_with_required_tool", None)
+            if callable(require_tool):
+                response = require_tool(messages, tools, "system_command")
+            else:
+                response = self.llm.complete(messages, tools=tools)
+            message = response["choices"][0]["message"]
+            tool_calls = message.get("tool_calls") or []
         if tool_calls:
             content = self._handle_tool_calls(messages, message, tool_calls, tools)
             if subagent_reports:
@@ -198,6 +227,19 @@ class AgentOrchestrator:
         if subagent_reports:
             self.subagents.mark_reported([item["id"] for item in subagent_reports])
         return content
+
+    @staticmethod
+    def _is_command_assignment(text: str) -> bool:
+        request = text.strip().lower()
+        if not request or re.search(r"\b(?:how to|how do i|what command|which command|explain|example)\b", request):
+            return False
+        return bool(
+            re.search(
+                r"^(?:please\s+)?(?:run|execute|install|uninstall|remove|update|upgrade|start|stop|restart|"
+                r"enable|disable|scan|check|inspect|list|show|find|create|copy|move|rename|download)\b",
+                request,
+            )
+        )
 
     def _tool_schemas(self) -> list[dict]:
         return [
@@ -392,10 +434,19 @@ class AgentOrchestrator:
             self._activity(f"command complete: {command}")
         return self.answer_from_tool_result(user_request, "\n\n".join(outputs))
 
-    def _handle_tool_calls(self, messages: list[dict], message: dict, tool_calls: list[dict], tools: list[dict]) -> str:
+    def _handle_tool_calls(
+        self,
+        messages: list[dict],
+        message: dict,
+        tool_calls: list[dict],
+        tools: list[dict],
+        compact_command_completion: bool = False,
+    ) -> str:
         import json
 
         last_tool_content = ""
+        last_tool_result: SkillResult | None = None
+        last_tool_arguments: dict = {}
         for _ in range(4):
             assistant_tool_calls = []
             tool_results = []
@@ -442,13 +493,21 @@ class AgentOrchestrator:
                 else:
                     self._activity(f"running tool {index}/{len(tool_calls)}: {name}")
                 result = self._run_skill_result(name, arguments)
+                last_tool_result = result
+                last_tool_arguments = arguments
                 if result.requires_confirmation:
                     self._activity(f"waiting for confirmation: {name}")
+                    user_request = next(
+                        (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                        "",
+                    )
                     self.pending_tool = {
                         "name": name,
                         "arguments": arguments,
                         "token": result.confirmation_token,
                         "resume_after_confirmation": True,
+                        "user_request": user_request,
+                        "compact_command_completion": compact_command_completion,
                     }
                     return result.confirmation_prompt or result.content
                 self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
@@ -477,6 +536,13 @@ class AgentOrchestrator:
             message = response["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
             if not tool_calls:
+                if compact_command_completion and last_tool_result is not None:
+                    content = self._confirmed_command_response(
+                        str(last_tool_arguments.get("command") or ""),
+                        last_tool_result,
+                    )
+                    self._save_assistant_message(content)
+                    return content
                 content = (message.get("content") or "").strip() or last_tool_content
                 self._activity("saving answer")
                 self._save_assistant_message(content)
@@ -509,8 +575,8 @@ class AgentOrchestrator:
         self._activity(f"tool complete: {name}")
         return result.content
 
-    def _run_skill_result(self, name: str, arguments: dict):
-        if name == "system_command" and "sudo_password" in arguments:
+    def _run_skill_result(self, name: str, arguments: dict, *, trusted_sudo_password: bool = False):
+        if name == "system_command" and "sudo_password" in arguments and not trusted_sudo_password:
             arguments = dict(arguments)
             arguments.pop("sudo_password", None)
         if name == "system_command":
@@ -523,6 +589,10 @@ class AgentOrchestrator:
                 skill = self.skills.get(name)
             except KeyError:
                 return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": arguments})
+            activity_label = skill.manifest.activity_label
+            if name == "system_command" and re.search(r"\b(?:install|installation)\b", str(arguments.get("command", "")), re.I):
+                activity_label = "installing"
+            self._activity(activity_label)
             if name == "create_skill" and not arguments.get("generated_source"):
                 prepared = self._prepare_complete_skill(arguments)
                 if isinstance(prepared, SkillResult):
@@ -542,8 +612,10 @@ class AgentOrchestrator:
                 result.data["loaded"] = loaded_name
             return result
         except Exception as exc:
+            safe_arguments = dict(arguments)
+            safe_arguments.pop("sudo_password", None)
             return SkillResult(
-                False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": arguments, "error": str(exc)}
+                False, f"Tool `{name}` failed: {exc}", {"tool": name, "arguments": safe_arguments, "error": str(exc)}
             )
         finally:
             self.active_skill = previous_skill
@@ -614,16 +686,94 @@ class AgentOrchestrator:
             arguments.update(extra_arguments)
         if confirmation_text:
             arguments["confirmation_text"] = confirmation_text
-        result = self._run_skill_result(pending["name"], arguments)
+        result = self._run_skill_result(
+            pending["name"],
+            arguments,
+            trusted_sudo_password=bool(extra_arguments and "sudo_password" in extra_arguments),
+        )
+        sudo_password = str((extra_arguments or {}).get("sudo_password") or "")
+        if sudo_password:
+            result.content = result.content.replace(sudo_password, "<redacted>")
+            result.data = self._redact_value(result.data, sudo_password)
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content
         self._record_tool_result(
             pending["name"], result.content, {"skill": pending["name"], "ok": result.ok, "data": result.data}
         )
+        if pending["name"] == "system_command" and pending.get("resume_after_confirmation"):
+            if not result.ok:
+                return self._recover_command_failure(
+                    str(pending.get("user_request") or pending.get("arguments", {}).get("command") or "command"),
+                    result,
+                )
+            command = str(pending.get("arguments", {}).get("command") or "")
+            response = self._confirmed_command_response(command, result)
+            self._save_assistant_message(response)
+            return response
         if pending["name"] == "create_skill" and result.ok and pending.get("resume_after_confirmation"):
             self.skill_resume_name = str(result.data.get("loaded") or "") or None
         return result.content
+
+    @staticmethod
+    def _redact_value(value, secret: str):
+        if isinstance(value, dict):
+            return {key: AgentOrchestrator._redact_value(item, secret) for key, item in value.items()}
+        if isinstance(value, list):
+            return [AgentOrchestrator._redact_value(item, secret) for item in value]
+        if isinstance(value, tuple):
+            return tuple(AgentOrchestrator._redact_value(item, secret) for item in value)
+        if isinstance(value, str):
+            return value.replace(secret, "<redacted>")
+        return value
+
+    @staticmethod
+    def _command_completion_message(result: SkillResult) -> str:
+        if result.ok:
+            return "Completed successfully"
+        lines = [line.strip() for line in result.content.splitlines() if line.strip()]
+        detail = lines[-1] if lines else "Command failed."
+        if len(detail) > 240:
+            detail = detail[:237].rstrip() + "..."
+        return f"Failed: {detail}"
+
+    @staticmethod
+    def _confirmed_command_response(command: str, result: SkillResult) -> str:
+        if not result.ok:
+            return AgentOrchestrator._command_completion_message(result)
+        if re.search(r"\b(?:install|installation)\b", command, re.I):
+            return "Completed successfully"
+        output = result.content.strip()
+        return output or "Completed successfully"
+
+    def _recover_command_failure(self, user_request: str, result: SkillResult) -> str:
+        self._activity("diagnosing command failure")
+        tools = self._tool_schemas()
+        messages = [
+            {"role": "system", "content": self._system_prompt()},
+            {
+                "role": "user",
+                "content": (
+                    f"Operational task:\n{user_request}\n\nCommand failure:\n{result.content}\n\n"
+                    "Diagnose the failure and use available tools to resolve it, then complete the original task. "
+                    "Do not merely describe commands. Stop if resolution requires unavailable information or unsafe assumptions."
+                ),
+            },
+        ]
+        response = self.llm.complete(messages, tools=tools)
+        message = response["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+        if not tool_calls:
+            completion = self._command_completion_message(result)
+            self._save_assistant_message(completion)
+            return completion
+        return self._handle_tool_calls(
+            messages,
+            message,
+            tool_calls,
+            tools,
+            compact_command_completion=True,
+        )
 
     def consume_skill_resume(self) -> str | None:
         name = self.skill_resume_name
@@ -665,6 +815,77 @@ class AgentOrchestrator:
             content = tool_result
         self._save_assistant_message(content)
         return content
+
+    def summarize_for_voice(self, text: str) -> str:
+        structured_packet_output = bool(
+            re.search(r"(?im)^\s*(?:chain\s+\S+\s+\(policy|pkts\s+bytes\s+target)", text)
+        )
+        if len(text.strip()) <= VOICE_SEMANTIC_SUMMARY_AFTER_CHARS and not structured_packet_output:
+            return text
+        self._activity("summarizing for speech")
+        try:
+            response = self.llm.complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are the spoken voice of a senior defensive security engineer. Summarize the supplied "
+                            "content in at most three short, natural sentences suitable for speech. State the security "
+                            "meaning, material exposure or risk, and the most useful next action when supported. Do not "
+                            "read tables, columns, packet or byte counters, rule-table headers, identifiers, raw logs, "
+                            "or command output line by line. Do not quote packet-level data. Do not invent "
+                            "facts, vulnerabilities, severity, or remediation unsupported by the content. Return only "
+                            "the spoken summary, without Markdown or a preamble."
+                        ),
+                    },
+                    {"role": "user", "content": text},
+                ],
+                tools=None,
+            )
+            summary = (response["choices"][0]["message"].get("content") or "").strip()
+            return summary or text
+        except Exception:
+            return text
+
+    def startup_greeting(self) -> str:
+        metadata = self.sessions.session_metadata(self.session_id)
+        previous = str(metadata.get("startup_greeting") or "")
+        moment = datetime.now().strftime("%A %H:%M")
+        try:
+            response = self.llm.complete(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Speak as Ulysses, a calm senior defensive security operator. Produce one fresh, intelligent "
+                            "startup greeting of 12 to 24 words. Convey exceptional technical judgment, confidence, and "
+                            "command of security operations through precise language rather than explicit boasting. Make "
+                            "it natural and security-minded, not a system status report. Do not use Markdown, clichés, or "
+                            "claim that checks were performed. Return only the greeting."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Current local moment: {moment}. Previous greeting to avoid: {previous or 'none'}.",
+                    },
+                ],
+                tools=None,
+            )
+            greeting = (response["choices"][0]["message"].get("content") or "").strip()
+        except Exception:
+            greeting = ""
+        fallbacks = [
+            "Ready when you are. We will separate signal from noise and turn evidence into decisive security action.",
+            "Welcome back. Precise scope, disciplined analysis, and defensible evidence will guide every move.",
+            "Ulysses is ready. We will challenge assumptions, expose weak controls, and resolve risk with precision.",
+            "Let us begin. Complex security problems become manageable when evidence, judgment, and execution align.",
+        ]
+        if not greeting or greeting == previous:
+            choices = [item for item in fallbacks if item != previous] or fallbacks
+            greeting = random.choice(choices)
+        metadata["startup_greeting"] = greeting
+        self.sessions.update_session_metadata(self.session_id, metadata)
+        return greeting
 
     def erase_user_data(self) -> None:
         self.sessions.erase_all()

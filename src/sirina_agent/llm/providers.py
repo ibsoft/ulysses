@@ -21,6 +21,25 @@ class LLMProviderError(RuntimeError):
     pass
 
 
+class UnconfiguredProvider:
+    configured = False
+
+    def __init__(self, reason: str = "No language-model provider is configured.") -> None:
+        self.reason = reason
+
+    def complete(self, messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "A provider must be configured before I can process requests. Press F7 to open provider setup.",
+                    }
+                }
+            ]
+        }
+
+
 class OpenAICompatibleProvider:
     def __init__(self, base_url: str, model: str, api_key: str, timeout_seconds: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -33,6 +52,29 @@ class OpenAICompatibleProvider:
         if tools:
             payload["tools"] = tools
         return self._post(payload, allow_tool_fallback=bool(tools))
+
+    def complete_with_required_tool(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        tool_name: str,
+    ) -> dict[str, Any]:
+        selected_tools = [
+            tool
+            for tool in tools
+            if isinstance(tool.get("function"), dict) and tool["function"].get("name") == tool_name
+        ]
+        if not selected_tools:
+            raise LLMProviderError(f"Required tool is not available: {tool_name}")
+        return self._post(
+            {
+                "model": self.model,
+                "messages": messages,
+                "tools": selected_tools,
+                "tool_choice": {"type": "function", "function": {"name": tool_name}},
+            },
+            allow_tool_fallback=False,
+        )
 
     def _post(self, payload: dict[str, Any], allow_tool_fallback: bool = False) -> dict[str, Any]:
         response = httpx.post(
