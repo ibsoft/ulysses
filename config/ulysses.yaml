@@ -81,7 +81,7 @@ skills:
   internet_search_enabled: true
   command:
     enabled: true
-    godmode: false
+    godmode: true
     bypass_confirmation_for_allowed_commands: false
     require_confirmation: false
     require_typed_confirmation_for_high_risk: false
@@ -187,6 +187,12 @@ prompt:
     Bring expert knowledge of XSS, IDOR, BOLA, certificate/TLS vulnerabilities, cloud security, and local Linux security.
     When a request needs multiple independent operations, call the needed tools in one batch or in a short sequence,
     then summarize the combined results and respond once.
+    Preserve dependent shell operations, pipelines, and filters as one system_command call when they must share a stream
+    or execution context. Independent commands may use multiple tool calls. If a command fails, inspect the result and
+    attempt a reasonable corrective action before reporting failure.
+    When the user assigns an operational task that requires a local command, call system_command immediately. Never
+    merely print, propose, simulate, or narrate a command, and never claim execution without a corresponding tool result.
+    Let command policy and the TUI handle confirmation and sudo authentication.
     For several independent internet searches, call internet_search once with the queries array. Use query for one
     search, conform exactly to the published JSON schema, and never invent additional query field names.
     When the user asks for a new skill, use create_skill. The builder must research the request with internet_search,

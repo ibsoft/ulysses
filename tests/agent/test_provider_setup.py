@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 from sirina_agent.config.loader import load_config
 from sirina_agent.config.models import LLMConfig, UlyssesConfig
 from sirina_agent.config.provider_setup import (
@@ -9,7 +11,13 @@ from sirina_agent.config.provider_setup import (
     load_env_file,
     setup_from_provider,
 )
-from sirina_agent.llm.providers import CodexProvider, OpenAICompatibleProvider, build_provider
+from sirina_agent.llm.providers import (
+    CodexProvider,
+    LLMProviderError,
+    OpenAICompatibleProvider,
+    UnconfiguredProvider,
+    build_provider,
+)
 
 
 def test_kimi_provider_setup_writes_yaml_and_env(tmp_path):
@@ -84,3 +92,48 @@ def test_openai_browser_provider_uses_codex_backend():
 
     assert isinstance(provider, CodexProvider)
     assert provider.model == "gpt-5.3-codex"
+
+
+def test_unconfigured_provider_keeps_first_run_responsive():
+    provider = UnconfiguredProvider("OPENAI_API_KEY is missing")
+
+    response = provider.complete([{"role": "user", "content": "hello"}])
+
+    assert not provider.configured
+    assert "Press F7" in response["choices"][0]["message"]["content"]
+    assert "OPENAI_API_KEY" not in response["choices"][0]["message"]["content"]
+
+
+def test_required_tool_request_excludes_unrelated_invalid_schemas(monkeypatch):
+    provider = OpenAICompatibleProvider("https://api.example", "model", "secret")
+    captured = {}
+
+    def fake_post(payload, allow_tool_fallback=False):
+        captured.update(payload)
+        captured["allow_tool_fallback"] = allow_tool_fallback
+        return {"choices": []}
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "internet_search", "parameters": {"oneOf": [{"type": "object"}]}},
+        },
+        {
+            "type": "function",
+            "function": {"name": "system_command", "parameters": {"type": "object"}},
+        },
+    ]
+
+    provider.complete_with_required_tool([{"role": "user", "content": "do it"}], tools, "system_command")
+
+    assert [tool["function"]["name"] for tool in captured["tools"]] == ["system_command"]
+    assert captured["tool_choice"]["function"]["name"] == "system_command"
+    assert captured["allow_tool_fallback"] is False
+
+
+def test_required_tool_request_rejects_missing_tool():
+    provider = OpenAICompatibleProvider("https://api.example", "model", "secret")
+
+    with pytest.raises(LLMProviderError, match="Required tool is not available"):
+        provider.complete_with_required_tool([], [], "system_command")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -10,7 +11,10 @@ from datetime import datetime
 from itertools import cycle
 from threading import Thread
 
+from rich.console import Group
+from rich.markdown import Markdown
 from rich.markup import escape
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -71,6 +75,17 @@ class TranscriptLog(RichLog):
         return selection.extract(text), "\n"
 
 
+def _formatted_transcript_content(text: str):
+    markdown = bool(
+        re.search(r"(?m)^#{1,6}\s+\S", text)
+        or re.search(r"(?m)^```", text)
+        or re.search(r"(?m)^\s*[-*+]\s+\S", text)
+        or re.search(r"(?m)^\s*\d+\.\s+\S", text)
+        or re.search(r"(?m)^\s*\|.*\|\s*$\n^\s*\|?\s*:?-{3,}", text)
+    )
+    return Markdown(text) if markdown else Text(text)
+
+
 class ComposerInput(Input):
     def _on_paste(self, event: Paste) -> None:
         event.prevent_default()
@@ -91,6 +106,8 @@ class ComposerInput(Input):
 
 
 class SudoPasswordScreen(ModalScreen[str | None]):
+    BINDINGS = [Binding("enter", "submit_password", "Run", show=False, priority=True)]
+
     CSS = """
     SudoPasswordScreen {
         align: center middle;
@@ -134,6 +151,9 @@ class SudoPasswordScreen(ModalScreen[str | None]):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self.dismiss(event.value)
+
+    def action_submit_password(self) -> None:
+        self.dismiss(self.query_one("#sudo-password", Input).value)
 
 
 class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
@@ -607,6 +627,17 @@ class UlyssesTextualApp(App):
         padding: 1 2;
     }
 
+    #spinner {
+        width: 100%;
+        height: 1;
+        background: transparent;
+        color: $text;
+        text-style: bold;
+        content-align: center middle;
+        text-align: center;
+        padding: 0;
+    }
+
     #boot-status {
         display: none;
         width: 100%;
@@ -663,6 +694,14 @@ class UlyssesTextualApp(App):
         "terminal": "textual-dark",
     }
     SPINNER_FRAMES = ("|", "/", "-", "\\")
+    ACTIVITY_FRAMES = (
+        "[█░░░░░]",
+        "[██░░░░]",
+        "[███░░░]",
+        "[████░░]",
+        "[█████░]",
+        "[██████]",
+    )
 
     def __init__(self, orchestrator, voice_io=None) -> None:
         super().__init__()
@@ -690,7 +729,7 @@ class UlyssesTextualApp(App):
         self._listen_cancel_requested = False
         self._speech_id = 0
         self._activity_text = "thinking"
-        self._spinner = cycle(self.SPINNER_FRAMES)
+        self._spinner = cycle(self.ACTIVITY_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
         self._subagent_collection_running = False
@@ -701,6 +740,7 @@ class UlyssesTextualApp(App):
         self._boot_timer = None
         self._boot_complete = False
         self._logo_frame_index = 0
+        self._provider_onboarding = not bool(getattr(orchestrator.llm, "configured", True))
         self.updates = UpdateManager(orchestrator.config.updates)
         self.title = self._local_version_text()
         self.connectors = ConnectorManager.from_config(
@@ -814,12 +854,29 @@ class UlyssesTextualApp(App):
             self.query_one("#boot-status", Static).display = False
             self._write_system(self._boot_message)
             self.connectors.start_all()
-            self._speak(self._boot_spoken_message)
+            if self._provider_onboarding:
+                guidance = (
+                    "No AI provider is configured. Press F7 and choose Provider Setup, then select a provider and "
+                    "enter its connection details or API key. I have opened provider setup for you."
+                )
+                self._write_assistant(guidance)
+                self._speak(guidance)
+                self.set_timer(0.4, self.action_setup)
+            else:
+                Thread(target=self._startup_greeting_in_thread, daemon=True).start()
             return
         completed = min(5, int(elapsed / 0.36))
         self._boot_frame_index = (self._boot_frame_index + 1) % len(self.SPINNER_FRAMES)
         frame = self.SPINNER_FRAMES[self._boot_frame_index]
         self.query_one("#boot-status", Static).update(_boot_progress(self._boot_message, completed, frame))
+
+    def _startup_greeting_in_thread(self) -> None:
+        greeting = self.orchestrator.startup_greeting()
+        self.call_from_thread(self._deliver_startup_greeting, greeting)
+
+    def _deliver_startup_greeting(self, greeting: str) -> None:
+        self._write_assistant(greeting)
+        self._speak(f"{self._boot_spoken_message} {greeting}")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -1153,10 +1210,18 @@ class UlyssesTextualApp(App):
             token = pending.get("token")
             self._open_sudo_password_dialog(token)
 
-    def _finish_confirmed_tool(self, tool_result: str) -> None:
-        self._write_tool(tool_result)
+    def _finish_confirmed_tool(self, tool_result: str, *, as_assistant: bool = False) -> None:
+        self._stop_waiting()
+        if as_assistant:
+            self._write_assistant(tool_result)
+            self._speak(tool_result)
+        else:
+            self._write_tool(tool_result)
         if self.orchestrator.pending_tool is not None:
             self._refresh_status()
+            if self.orchestrator.pending_tool_requires_sudo_password():
+                pending = self.orchestrator.pending_tool or {}
+                self._open_sudo_password_dialog(pending.get("token"))
             return
         resume_skill = self.orchestrator.consume_skill_resume()
         if resume_skill:
@@ -1257,7 +1322,12 @@ class UlyssesTextualApp(App):
             if self.orchestrator.pending_tool_requires_sudo_password():
                 self._open_sudo_password_dialog(token)
             else:
-                self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token))
+                pending = self.orchestrator.pending_tool or {}
+                as_assistant = pending.get("name") == "system_command" and bool(
+                    pending.get("resume_after_confirmation")
+                )
+                result = self.orchestrator.confirm_pending_tool(token)
+                self._finish_confirmed_tool(result, as_assistant=as_assistant)
         elif cmd == "/run" and len(parts) > 1:
             self._write_tool(self.orchestrator._run_skill("system_command", {"command": " ".join(parts[1:])}))
         elif cmd == "/create-skill" and len(parts) > 2:
@@ -1362,15 +1432,40 @@ class UlyssesTextualApp(App):
 
     def _confirm_with_sudo_password(self, token: str | None, password: str | None) -> None:
         composer = self.query_one("#composer", Input)
-        composer.disabled = False
         if password is None:
+            composer.disabled = False
             self.orchestrator.cancel_pending_tool()
             self._assessment_resume_target = None
             self._assessment_pending_check = None
             self._write_system("Sudo command cancelled.")
             composer.focus()
             return
-        self._finish_confirmed_tool(self.orchestrator.confirm_pending_tool(token, {"sudo_password": password}))
+        pending = self.orchestrator.pending_tool or {}
+        as_assistant = pending.get("name") == "system_command" and bool(pending.get("resume_after_confirmation"))
+        command = str(pending.get("arguments", {}).get("command", ""))
+        activity = "installing" if re.search(r"\b(?:install|installation)\b", command, re.I) else "running command"
+        self._waiting = True
+        self._activity_text = activity
+        composer.disabled = True
+        self.query_one("#spinner", Static).update(self._activity_renderable(next(self._spinner), f"Ulysses: {activity}"))
+        self._refresh_status()
+        Thread(
+            target=self._confirm_pending_tool_in_thread,
+            args=(token, password, as_assistant),
+            daemon=True,
+        ).start()
+
+    def _confirm_pending_tool_in_thread(
+        self,
+        token: str | None,
+        password: str,
+        as_assistant: bool,
+    ) -> None:
+        try:
+            result = self.orchestrator.confirm_pending_tool(token, {"sudo_password": password})
+        except Exception:
+            result = "Failed: command execution could not be completed"
+        self.call_from_thread(self._finish_confirmed_tool, result, as_assistant=as_assistant)
         self._refresh_status()
 
     def _open_sudo_password_dialog(self, token: str | None) -> None:
@@ -1794,11 +1889,15 @@ class UlyssesTextualApp(App):
             self._refresh_status()
             return
         self.artifacts = ArtifactManager.from_config(self.orchestrator.config)
+        self._provider_onboarding = False
         self._write_system(
             "Provider saved and activated:\n"
             f"{self.orchestrator.config.llm.provider} / {self.orchestrator.config.llm.model}\n"
             f"{self.orchestrator.config.llm.base_url}"
         )
+        question = "Provider setup is complete. How would you like me to address you?"
+        self._write_assistant(question)
+        self._speak(question)
         self._refresh_status()
 
     def action_voice_toggle(self) -> None:
@@ -1866,7 +1965,9 @@ class UlyssesTextualApp(App):
         self._activity_text = "listening"
         composer = self.query_one("#composer", Input)
         composer.disabled = True
-        self.query_one("#spinner", Static).update("| Ulysses: listening...")
+        self.query_one("#spinner", Static).update(
+            self._activity_renderable(next(self._spinner), "Ulysses: listening")
+        )
         self._refresh_status()
         Thread(target=self._listen_in_thread, daemon=True).start()
 
@@ -1999,6 +2100,7 @@ class UlyssesTextualApp(App):
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
             f"Connector: {connector_state}\n\n"
+            f"Activity\n{self._activity_text if self._waiting or self._speaking or self._listening else 'idle'}\n\n"
             f"Active skill\n{active_skill}\n\n"
             f"Sub-agents\n{self.orchestrator.subagents.summary() if self.orchestrator.subagents else 'disabled'}\n\n"
             f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
@@ -2100,7 +2202,7 @@ class UlyssesTextualApp(App):
         self._waiting = True
         self._activity_text = "starting"
         self.query_one("#composer", Input).disabled = True
-        self.query_one("#spinner", Static).update("| Ulysses: starting...")
+        self.query_one("#spinner", Static).update(self._activity_renderable(next(self._spinner), "Ulysses: starting"))
 
     def _stop_waiting(self) -> None:
         self._waiting = False
@@ -2119,14 +2221,19 @@ class UlyssesTextualApp(App):
         if self._speaking:
             self._logo_frame_index = (self._logo_frame_index + 1) % len(ULYSSES_SPEAKING_LOGOS)
             self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[self._logo_frame_index])
-        if self._waiting or self._speaking or self._listening:
-            self.query_one("#spinner", Static).update(f"{next(self._spinner)} {self._activity_label()}...")
+        active = self._waiting or self._speaking or self._listening
+        if active:
+            frame = next(self._spinner)
+            label = self._activity_label()
+            message = self._activity_renderable(frame, label)
+            self.query_one("#spinner", Static).update(message)
 
     def _activity_label(self) -> str:
-        active_skill = getattr(self.orchestrator, "active_skill", None)
-        if active_skill:
-            return f"Ulysses using skill {active_skill}"
         return f"Ulysses: {self._activity_text}"
+
+    @staticmethod
+    def _activity_renderable(frame: str, label: str, gap: str = " ") -> Text:
+        return Text.assemble((frame, "bold #ff8c00"), gap, label, "...")
 
     def _activity_from_worker(self, message: str) -> None:
         try:
@@ -2137,7 +2244,9 @@ class UlyssesTextualApp(App):
     def _set_activity(self, message: str) -> None:
         self._activity_text = message
         if self._waiting or self._speaking or self._listening:
-            self.query_one("#spinner", Static).update(f"{next(self._spinner)} {self._activity_label()}...")
+            self.query_one("#spinner", Static).update(
+                self._activity_renderable(next(self._spinner), self._activity_label())
+            )
         self._refresh_status()
 
     def _create_skill_in_thread(self, name: str, request: str) -> None:
@@ -2160,13 +2269,21 @@ class UlyssesTextualApp(App):
     def _write_assistant(self, text: str) -> None:
         self.last_assistant_text = text
         self.query_one("#transcript", TranscriptLog).write(
-            f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]\n{text}\n"
+            Group(
+                Text.from_markup(f"[bold magenta]Ulysses[/bold magenta] [dim]{_time()}[/dim]"),
+                _formatted_transcript_content(text),
+                Text(""),
+            )
         )
         self._append_plain("Ulysses", text)
 
     def _write_tool(self, text: str) -> None:
         self.query_one("#transcript", TranscriptLog).write(
-            f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]\n{text}\n"
+            Group(
+                Text.from_markup(f"[bold yellow]tool[/bold yellow] [dim]{_time()}[/dim]"),
+                _formatted_transcript_content(text),
+                Text(""),
+            )
         )
         self._append_plain("tool", text)
 
@@ -2189,11 +2306,11 @@ class UlyssesTextualApp(App):
         self._speech_id += 1
         speech_id = self._speech_id
         self.voice_io.interrupt()
-        self._speaking = True
-        self._logo_frame_index = 0
-        self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[0])
-        self._activity_text = "speaking"
-        self.query_one("#spinner", Static).update(f"{next(self._spinner)} Ulysses: speaking...")
+        self._speaking = False
+        self._activity_text = "preparing voice"
+        self.query_one("#spinner", Static).update(
+            self._activity_renderable(next(self._spinner), "Ulysses: preparing voice")
+        )
         self._refresh_status()
         Thread(target=self._speak_in_thread, args=(text, speech_id), daemon=True).start()
 
@@ -2202,11 +2319,27 @@ class UlyssesTextualApp(App):
 
     def _speak_in_thread(self, text: str, speech_id: int) -> None:
         try:
-            self.voice_io.speak(text)
+            spoken_text = self.orchestrator.summarize_for_voice(text)
+            self.voice_io.speak(
+                spoken_text,
+                on_playback_start=lambda: self.call_from_thread(self._start_speaking_ui, speech_id),
+            )
         except Exception as exc:
             self.call_from_thread(self._finish_speaking, speech_id, str(exc))
             return
         self.call_from_thread(self._finish_speaking, speech_id, None)
+
+    def _start_speaking_ui(self, speech_id: int) -> None:
+        if speech_id != self._speech_id:
+            return
+        self._speaking = True
+        self._logo_frame_index = 0
+        self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[0])
+        self._activity_text = "speaking"
+        self.query_one("#spinner", Static).update(
+            self._activity_renderable(next(self._spinner), "Ulysses: speaking")
+        )
+        self._refresh_status()
 
     def _finish_speaking(self, speech_id: int, error: str | None) -> None:
         if speech_id != self._speech_id:

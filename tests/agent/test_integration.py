@@ -65,6 +65,30 @@ class ToolCallProvider:
         }
 
 
+class ToolCallThenCompletionProvider:
+    def __init__(self):
+        self.calls = 0
+        self.saw_tool_result = False
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {"function": {"name": "system_command", "arguments": '{"command": "pwd"}'}}
+                            ],
+                        }
+                    }
+                ]
+            }
+        self.saw_tool_result = any("Tool output:" in str(message.get("content") or "") for message in messages)
+        return {"choices": [{"message": {"role": "assistant", "content": "The command completed successfully."}}]}
+
+
 class RecordingProvider:
     def __init__(self):
         self.calls = []
@@ -74,6 +98,90 @@ class RecordingProvider:
         if "Consolidate this session history" in messages[-1]["content"]:
             return {"choices": [{"message": {"role": "assistant", "content": "summary of older context"}}]}
         return {"choices": [{"message": {"role": "assistant", "content": "final answer"}}]}
+
+
+class SecurityVoiceSummaryProvider:
+    def complete(self, messages, tools=None):
+        assert "senior defensive security engineer" in messages[0]["content"]
+        assert "Chain INPUT" in messages[1]["content"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": (
+                            "The host firewall accepts inbound and forwarded traffic by default, with no filtering "
+                            "rules visible. This leaves network exposure controlled by listening services rather than "
+                            "host policy; define a default-deny baseline after confirming required access."
+                        ),
+                    }
+                }
+            ]
+        }
+
+
+def test_long_firewall_output_gets_meaningful_security_voice_summary(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    agent = AgentOrchestrator(cfg, sessions, memory, SecurityVoiceSummaryProvider(), SkillRegistry())
+    firewall_output = (
+        "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)\n"
+        "pkts bytes target prot opt in out source destination\n" * 8
+    )
+
+    summary = agent.summarize_for_voice(firewall_output)
+
+    assert "accepts inbound and forwarded traffic" in summary
+    assert "packets" not in summary
+    assert "bytes" not in summary
+
+
+class NarrateThenCommandProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return {"choices": [{"message": {"role": "assistant", "content": "I will run `pwd`."}}]}
+        if self.calls > 2:
+            return {"choices": [{"message": {"role": "assistant", "content": "Command completed."}}]}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": "system_command", "arguments": '{"command": "pwd"}'}}
+                        ],
+                    }
+                }
+            ]
+        }
+
+
+class RequiredToolProvider:
+    def __init__(self):
+        self.required = None
+
+    def complete(self, messages, tools=None):
+        return {"choices": [{"message": {"role": "assistant", "content": "system_command: uname -a"}}]}
+
+    def complete_with_required_tool(self, messages, tools, tool_name):
+        self.required = tool_name
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {"function": {"name": tool_name, "arguments": '{"command": "pwd"}'}}
+                        ],
+                    }
+                }
+            ]
+        }
 
 
 class SearchThenAnswerProvider:
@@ -272,6 +380,94 @@ def test_orchestrator_pending_tool_confirmation(tmp_path):
     assert str(tmp_path) in result
 
 
+def test_confirmed_model_command_resumes_with_completion_answer(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], require_confirmation=True)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    provider = ToolCallThenCompletionProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    prompt = agent.handle_text("run the working-directory command")
+    result = agent.confirm_pending_tool()
+
+    assert "Confirmation token" in prompt
+    assert str(tmp_path) in result
+    assert provider.calls == 1
+
+
+def test_confirmed_command_failure_returns_only_compact_error():
+    result = SkillResult(
+        False,
+        "large diagnostic output\nintermediate detail\npermission denied",
+        {"returncode": 1},
+    )
+
+    completion = AgentOrchestrator._command_completion_message(result)
+
+    assert completion == "Failed: permission denied"
+    assert "large diagnostic" not in completion
+
+
+def test_confirmed_install_hides_raw_output_but_information_command_returns_it():
+    success = SkillResult(True, "many package installation lines", {"returncode": 0})
+    information = SkillResult(True, "rule one\nrule two", {"returncode": 0})
+
+    assert AgentOrchestrator._confirmed_command_response("sudo apt install package", success) == "Completed successfully"
+    assert AgentOrchestrator._confirmed_command_response("sudo firewall-tool list", information) == "rule one\nrule two"
+
+
+def test_command_assignment_retries_prose_as_real_tool_call(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], require_confirmation=False)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    provider = NarrateThenCommandProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    result = agent.handle_text("run pwd")
+
+    assert result == "Command completed."
+    assert provider.calls == 3
+    assert any(message.role == "tool" and str(tmp_path) in message.content for message in sessions.messages(agent.session_id))
+
+
+def test_command_assignment_requires_structured_provider_tool_call(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], require_confirmation=False)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    provider = RequiredToolProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
+
+    agent.handle_text("run the requested local operation")
+
+    assert provider.required == "system_command"
+    assert any(message.role == "tool" and str(tmp_path) in message.content for message in sessions.messages(agent.session_id))
+
+
+def test_plain_yes_confirms_pending_command(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["pwd"], [], tmp_path, ["PATH"], require_confirmation=True)
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(CommandRunner(policy, logging.getLogger("test"), 2, 1000)))
+    agent = AgentOrchestrator(cfg, sessions, memory, MockProvider(), registry)
+    agent._run_skill("system_command", {"command": "pwd"})
+
+    result = agent.handle_text("yes")
+
+    assert str(tmp_path) in result
+    assert agent.pending_tool is None
+
+
 def test_pending_sudo_tool_requests_secure_password_dialog_even_in_godmode(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
@@ -302,6 +498,32 @@ def test_model_supplied_sudo_password_is_discarded(tmp_path):
     assert result.requires_confirmation
     assert result.data["sudo_password_required"]
     assert "must-not-be-used-or-stored" not in repr(result)
+
+
+def test_trusted_sudo_password_reaches_only_command_runner(tmp_path):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["id"], [], tmp_path, ["PATH"], godmode=True)
+    runner = CommandRunner(policy, logging.getLogger("test"), 2, 1000)
+    received = {}
+
+    def fake_run(argv, sudo_password=None):
+        received["argv"] = argv
+        received["password"] = sudo_password
+        return {"returncode": 0, "stdout": "ok", "stderr": ""}
+
+    runner.run = fake_run
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(runner))
+    agent = AgentOrchestrator(cfg, sessions, memory, MockProvider(), registry)
+    agent._run_skill("system_command", {"command": "sudo id"})
+
+    result = agent.confirm_pending_tool(extra_arguments={"sudo_password": "modal-secret"})
+
+    assert result == "ok"
+    assert received == {"argv": ["sudo", "id"], "password": "modal-secret"}
+    assert "modal-secret" not in repr(sessions.messages(agent.session_id))
 
 
 def test_orchestrator_completes_answer_after_tool_call(tmp_path):

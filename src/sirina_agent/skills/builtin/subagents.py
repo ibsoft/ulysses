@@ -29,6 +29,7 @@ class CreateSubagentSkill:
         },
         required_permissions=["write_subagents"],
         risk_level="medium",
+        activity_label="constructing sub-agent",
     )
 
     def __init__(self, manager) -> None:
@@ -67,6 +68,7 @@ class DelegateSubagentSkill:
         },
         required_permissions=["invoke_llm", "write_subagents"],
         risk_level="medium",
+        activity_label="delegating task",
     )
 
     def __init__(self, manager) -> None:
@@ -103,6 +105,7 @@ class UpdateSubagentSkill:
         },
         required_permissions=["write_subagents"],
         risk_level="medium",
+        activity_label="updating sub-agent",
     )
 
     def __init__(self, manager) -> None:
@@ -134,6 +137,7 @@ class SubagentJobsSkill:
         },
         required_permissions=["read_subagents"],
         risk_level="low",
+        activity_label="checking sub-agents",
     )
 
     def __init__(self, manager) -> None:
@@ -171,6 +175,7 @@ class DeleteSubagentSkill:
         },
         required_permissions=["delete_subagents"],
         risk_level="high",
+        activity_label="deleting sub-agent",
     )
 
     def __init__(self, manager) -> None:

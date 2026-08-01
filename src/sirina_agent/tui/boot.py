@@ -42,7 +42,8 @@ def spoken_startup_brief(orchestrator, voice_io=None) -> str:
         ("Prompt", prompt_ok),
         ("Voice", voice_io is not None),
     ]
-    lines = [f"{name} {'up' if ok else 'needs setup'}." for name, ok in checks]
+    lines = ["Ulysses Cyber Sentinel starting."]
+    lines.extend(f"{name} {'up' if ok else 'needs setup'}." for name, ok in checks)
     if all(ok for _, ok in checks[:4]):
         lines.append("All systems ready and operational.")
     else:

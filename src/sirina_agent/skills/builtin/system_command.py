@@ -23,6 +23,7 @@ class SystemCommandSkill:
         required_permissions=["local_process"],
         risk_level="high",
         enabled=True,
+        activity_label="running command",
     )
 
     def __init__(self, runner: CommandRunner) -> None:

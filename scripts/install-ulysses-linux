@@ -73,6 +73,8 @@ run_animated() {
   local status
   local frame
   local i=0
+  local started_at=${SECONDS}
+  local elapsed
   local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
   CURRENT_STEP=$((CURRENT_STEP + 1))
   log_file="$(mktemp "${TMPDIR:-/tmp}/ulysses-install.XXXXXX")"
@@ -82,7 +84,10 @@ run_animated() {
   if [[ "${INTERACTIVE}" == true ]]; then
     while kill -0 "${pid}" 2>/dev/null; do
       frame="${frames[i++ % ${#frames[@]}]}"
-      printf "\r\033[2K%s%s%s  [%02d/%02d] %s" "${ACCENT}" "${frame}" "${RESET}" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}"
+      elapsed=$((SECONDS - started_at))
+      printf "\r\033[2K%s%s%s  [%02d/%02d] %s (%dm %02ds)" \
+        "${ACCENT}" "${frame}" "${RESET}" "${CURRENT_STEP}" "${TOTAL_STEPS}" "${message}" \
+        "$((elapsed / 60))" "$((elapsed % 60))"
       sleep 0.08
     done
   else
@@ -255,6 +260,16 @@ prepare_models() {
   "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all
 }
 
+install_agent_dependencies() {
+  # sentence-transformers depends on PyTorch. Installing it from PyPI on Linux
+  # can pull in several gigabytes of CUDA libraries even though Ulysses runs its
+  # embedding model on the CPU. Seed the environment with the official CPU
+  # wheel so the dependency resolver reuses it.
+  local torch_index="${ULYSSES_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
+  "${APP_HOME}/venv/bin/python" -m pip install torch --index-url "${torch_index}"
+  "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]"
+}
+
 run_animated "Preparing installation directories" prepare_directories
 run_animated "Synchronizing application source" sync_application
 
@@ -270,7 +285,7 @@ else
   run_animated "Validating Python 3.11+" validate_python
   run_animated "Preparing isolated Python environment" prepare_virtual_environment
   run_animated "Upgrading Python package tooling" "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip
-  run_animated "Installing Ulysses and agent dependencies" "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]"
+  run_animated "Installing CPU inference runtime, Ulysses, and agent dependencies" install_agent_dependencies
   run_animated "Checking and preparing Sirina voice models" prepare_models
 fi
 
