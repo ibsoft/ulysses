@@ -259,6 +259,12 @@ class AgentOrchestrator:
             return False
         if re.search(r"^(?:give|show|provide)\s+(?:me\s+)?(?:an?\s+)?example\b", request):
             return False
+        if re.search(
+            r"\b(?:current|live|system)\b.*\b(?:status|state|time|date|identity|resources?|hardware|network)\b"
+            r"|\b(?:status|state|time|date|identity|resources?|hardware|network)\b.*\b(?:current|live|system)\b",
+            request,
+        ):
+            return True
         return bool(
             re.search(
                 r"^(?:please\s+)?(?:run|execute|install|uninstall|remove|update|upgrade|start|stop|restart|"
@@ -926,12 +932,40 @@ class AgentOrchestrator:
         self._save_assistant_message(content)
         return content
 
-    def summarize_for_voice(self, text: str) -> str:
+    def summarize_for_voice(self, text: str, force: bool = False) -> str:
         # Derive speech only from the answer currently displayed. A second LLM
         # call can leak unrelated conversational context into the spoken output.
-        from sirina_agent.audio.sirina_io import summarize_for_speech
+        from sirina_agent.audio.sirina_io import (
+            _clean_spoken_text,
+            _clip_sentence,
+            _remove_unsafe_speech_content,
+            summarize_for_speech,
+        )
 
-        return summarize_for_speech(text)
+        cfg = self.config.sirina
+        safe_text = _clean_spoken_text(_remove_unsafe_speech_content(text))
+        if not cfg.voice_summary_enabled or (not force and len(safe_text) <= cfg.voice_summary_after_chars):
+            return summarize_for_speech(text, force=force)
+        try:
+            from sirina_agent.audio.local_summarizer import get_local_voice_summarizer
+
+            self._activity("loading local voice summarization model")
+            summarizer = get_local_voice_summarizer(
+                str(cfg.voice_summary_model_path),
+                cfg.voice_summary_max_input_tokens,
+                cfg.voice_summary_max_chunks,
+                cfg.voice_summary_max_output_tokens,
+            )
+            device = str(getattr(summarizer, "device", "local"))
+            self._activity(f"summarizing response locally ({device})")
+            summary = summarizer.summarize(safe_text)
+            if summary:
+                self._activity("preparing summarized voice playback")
+                return _clip_sentence("Summary: " + summary, cfg.voice_summary_max_chars)
+        except Exception:
+            self._activity("local voice summary unavailable; using safe fallback")
+            pass
+        return summarize_for_speech(text, force=force)
 
     def startup_greeting(self) -> str:
         metadata = self.sessions.session_metadata(self.session_id)

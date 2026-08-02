@@ -202,7 +202,8 @@ The current-user installation contains:
 ### 4. Download And Verify All Sirina Models
 
 The installer automatically downloads the complete Sirina `all` model group. This includes the ASR/STT assets used for
-speech recognition and the TTS assets used for Kokoro voices. To explicitly download all models again, or resume after an
+speech recognition and the TTS assets used for Kokoro voices. It also downloads and validates the configurable local
+voice-summary model under `models/voice-summary`. To explicitly download all Sirina models again, or resume after an
 interrupted model download, run this single command:
 
 ```bash
@@ -620,6 +621,10 @@ In the composer, `Ctrl+V` reads the system clipboard through `xclip`/`xsel` on X
 `Ctrl+Shift+V` remains the terminal emulator's native paste fallback. Multiline and large clipboard content is preserved
 as a text attachment instead of being truncated into a single-line input.
 
+Text selected inside the Textual interface is copied automatically when the left mouse button is released. Ulysses writes
+the selection to both its internal clipboard and the system clipboard. `Ctrl+S` selection mode blurs the composer for
+easier drag selection but keeps mouse handling inside Ulysses so automatic copying remains available.
+
 Use an API-key provider by setting `llm.provider`, `llm.base_url`, and key settings in `config/ulysses.yaml` or with
 `ULYSSES__...` environment overrides. Interactive browser login must be started from `/setup providers`.
 
@@ -647,6 +652,11 @@ reach the normal command-policy timeout.
 
 Reports can be retrieved locally with `show reports`, `show report 2`, `show the latest report`, or
 `show report for <target>`. An active assessment's report is preferred when no selector is supplied.
+
+Recurring prompt tasks are stored locally in `var/ulysses/tasks.json` and survive restarts. Create one naturally with
+`Every 30 minutes, check the service`, or use `/task add every 30 minutes :: check the service`. Five-field cron schedules
+are also accepted. Use `/tasks` and `/task pause|resume|run|delete <task_id>` to manage jobs. Due prompts run in the
+background through the normal Ulysses command policy and show live activity in the TUI.
 
 When active context reaches `context.rollover_threshold_percent` (100% by default), Ulysses automatically summarizes the older history, creates a continuation session,
 copies the most recent messages into it, and switches to that new session with the summary carried forward.
@@ -808,6 +818,12 @@ allowlist, denylist, normal confirmation, high-risk typed confirmation, and perm
 `bash -lc`; working-directory, environment, timeout, output-cap, and audit controls remain active. Do not enable it unless
 you accept uncontrolled local command execution, including during autonomous operation.
 
+The default non-godmode allowlist includes common read-only system inspection tools such as `date`, `hostname`, `id`,
+`free`, `vmstat`, hardware-listing commands, file metadata/text inspection utilities, and basic network diagnostics. The
+loader merges newly supported defaults into an existing configured allowlist without removing local additions.
+Live system-information questions enter the normal tool-selection path, where the configured LLM chooses among allowed
+commands and the command policy validates its choice. No question is mapped to a fixed executable in application code.
+
 ## Privacy And Data
 
 By default, Ulysses stores:
@@ -874,3 +890,58 @@ ruff check .
 ## More Documentation
 
 See `docs/ULYSSES.md` for deeper architecture notes, prompt behavior, context consolidation, voice flow, terminal shortcuts, and the threat model.
+
+## Recurring Prompt Tasks
+
+Ulysses includes an application-level recurring scheduler. Tasks are prompts, so they can request ordinary assistant work
+or authorized tool operations without embedding commands in the scheduler itself.
+
+Create tasks using natural interval or daily syntax:
+
+```text
+Every 30 minutes, check the web service
+Daily at 09:00, summarize the local security status
+```
+
+Or use explicit schedule syntax:
+
+```text
+/task add every 30 minutes :: check the web service
+/task add daily at 09:00 :: summarize the local security status
+/task add */15 * * * * :: check whether the service is reachable
+```
+
+Manage persisted tasks with:
+
+```text
+/tasks
+/task pause <task_id>
+/task resume <task_id>
+/task run <task_id>
+/task delete <task_id>
+```
+
+Schedules use the system's local timezone and accept intervals, daily times, or numeric five-field cron-style expressions
+with wildcards, ranges, lists, and steps. Task state is stored in `var/ulysses/tasks.json` and survives restarts. Jobs
+execute while Ulysses is running; an overdue enabled task
+runs after the application starts again. The TUI displays the task ID, prompt, spinner, and elapsed execution time.
+
+Scheduled prompts pass through the same provider, command policy, confirmations, godmode configuration, audit logging,
+and context management as interactive prompts. Scheduling never grants additional privileges. A task requiring user
+confirmation remains subject to that confirmation, and remote interfaces cannot supply sudo credentials.
+
+## Local Voice Summaries
+
+The installer downloads `sirina.voice_summary_model` into `sirina.voice_summary_model_path`. Long responses are cleaned
+of code and switch-heavy commands, sampled across the complete response, and summarized locally for speech without
+sending conversation history to a provider. CUDA is used when available to PyTorch; otherwise inference uses CPU. If the
+model cannot load or summarize, Ulysses falls back to its deterministic safe speech summary while leaving the complete
+response in the transcript. Status shows model loading, local CPU/CUDA summarization, and summarized playback preparation
+with the live elapsed indicator. See `docs/ULYSSES.md` for all configuration fields and installer overrides.
+
+`summarize last response` and `summarize previous answer` are local intents. They summarize the last displayed assistant
+response directly and do not call the configured chat provider, so they continue working during provider or network errors.
+
+For an existing installation, `scripts/install-ulysses-linux --sync-only` validates the configured local summary model
+and downloads it only when missing or invalid. Existing valid model files are reused. The same sync checks the installed
+NumPy/Numba combination and repairs an incompatible NumPy 2.5 installation before voice input starts.

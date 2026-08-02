@@ -461,6 +461,12 @@ selects by list number, `show the latest report` selects the newest, and `show r
 matching assessment. Within an active assessment, `show me the report` prefers that project's newest report; otherwise an
 ambiguous request displays the list instead of guessing.
 
+Recurring jobs accept prompt schedules such as `Every 30 minutes, check the service`, explicit task creation with
+`/task add <schedule> :: <prompt>`, and five-field cron expressions. `/tasks` lists persisted jobs;
+`/task pause|resume|run|delete <task_id>` controls them. Schedules use local system time, persist in
+`var/ulysses/tasks.json`, execute through the existing security policy, and expose their prompt and elapsed activity while
+running.
+
 At `context.rollover_threshold_percent` active-context usage (100% by default), automatic consolidation creates a new continuation session. The generated summary and the
 most recent configured messages are carried forward, while the complete previous session remains stored and linked to the
 new session.
@@ -810,7 +816,10 @@ separate plaintext history file.
 - `F7`: provider setup
 - `Ctrl+Q`: quit
 
-Terminal drag-selection is owned by your terminal emulator, not Textual. Use `/select on` or `Ctrl+S` to blur the input and make native terminal selection easier; terminals that support copy-on-select will then copy selected text automatically. Ulysses also provides `/copy` for the last answer and `/copy all` for the transcript.
+Textual owns normal drag-selection. Releasing the left mouse button copies the selected word or range into both the
+Textual clipboard and the operating-system clipboard. Use `/select on` or `Ctrl+S` to blur the composer for easier text
+selection; mouse capture remains enabled so Ulysses receives the release event. `/copy` still copies the last answer and
+`/copy all` copies the transcript.
 
 `Ctrl+V` requires `xclip` or `xsel` on X11, `wl-clipboard` on Wayland, or PowerShell clipboard access under WSL.
 `Ctrl+Shift+V` is handled by the terminal emulator and remains the fallback when no native clipboard reader is installed.
@@ -848,3 +857,102 @@ Conversation messages are stored in SQLite. Semantic memory text and metadata ar
 Primary risks are credential leakage, unsafe tool execution, unintended microphone capture, prompt injection through retrieved web content, excessive memory retention, and out-of-scope security testing. Ulysses mitigates these with secret redaction, environment filtering, command allowlists and denylists, confirmation prompts, typed confirmation for high-risk commands, audit logs, source-tagged memory retrieval, explicit deletion commands, and provider authentication through official configuration only.
 
 The default prompt treats the local host as a protected system. When compromise is suspected, Ulysses should prioritize containment, evidence preservation, impact assessment, recovery, and hardening. For intrusive testing against other systems, scope and authorization should be explicit before proceeding.
+
+## Recurring Prompt Task System
+
+The recurring-task subsystem is an application scheduler rather than a wrapper around fixed operating-system commands.
+Each task stores a schedule and an arbitrary Ulysses prompt. When due, the prompt enters the normal orchestrator path and
+therefore retains provider-independent behavior and existing security controls.
+
+Supported schedules:
+
+- `every N minutes`
+- `every N hours`
+- `every N days`
+- `daily at HH:MM` or `every day at HH:MM`
+- Numeric five-field cron-style syntax: minute, hour, day of month, month, day of week; wildcards, ranges, lists, and steps
+
+Natural creation examples:
+
+```text
+Every 10 minutes, check whether the web service is reachable
+Daily at 08:30, summarize recent defensive findings
+```
+
+Explicit creation examples:
+
+```text
+/task add every 10 minutes :: check whether the web service is reachable
+/task add daily at 08:30 :: summarize recent defensive findings
+/task add 0 9 * * 1-5 :: prepare the weekday security status
+```
+
+Lifecycle commands:
+
+```text
+/tasks
+/task list
+/task pause <task_id>
+/task resume <task_id>
+/task run <task_id>
+/task delete <task_id>
+```
+
+`/tasks` displays each identifier, enabled or paused state, next execution time, schedule, and prompt. Runtime state also
+tracks the last start, finish, and a bounded result preview. `/task run` starts a task immediately and recalculates its next
+recurring time from that run.
+
+Tasks persist in `var/ulysses/tasks.json` using atomic file replacement. Times are timezone-aware and follow the local
+system timezone. The scheduler checks for due work while Ulysses is running. If the application was stopped when a task
+became due, the enabled overdue task runs after startup; it does not execute independently as an OS daemon while Ulysses
+is closed.
+
+Textual and Rich fallback interfaces both execute persisted tasks. Textual additionally shows task counts in the sidebar
+and presents the running task's ID, prompt, animated indicator, and elapsed time. Results are returned to the interface and
+recorded in task state.
+
+Security behavior is unchanged for scheduled execution. Prompts use the existing orchestrator, allowlists, denylists,
+confirmation requirements, godmode state, credential-vault boundaries, output limits, timeouts, and audit logging. A task
+does not gain authority by being scheduled. Operations requiring confirmation or local sudo authentication remain subject
+to those controls.
+
+## Local Voice Summarization
+
+Long spoken responses use a local sequence-to-sequence summarizer rather than selecting only the opening lines. The
+installer downloads and validates the configured model into `models/voice-summary`; the default is the Apache-2.0
+T5-small summarization model `Falconsai/text_summarization`. The current response is cleaned of fenced code and
+switch-heavy command lines before inference. Conversation history is never supplied to the voice summarizer.
+
+Responses longer than `sirina.voice_summary_after_chars` are tokenized into representative chunks spanning the complete
+text. Each chunk is summarized locally and the partial summaries are reduced into the final spoken summary. This allows
+conclusions and findings near the end of a large response to influence speech. If loading or inference fails, Ulysses uses
+the deterministic safe summarizer and keeps the full response visible in the transcript.
+
+The activity status reports `loading local voice summarization model` during first-use loading,
+`summarizing response locally (cpu|cuda)` during inference, and `preparing summarized voice playback` before TTS starts.
+The spinner and elapsed counter remain active throughout these phases.
+
+Requests matching `summarize last response`, `summarize previous response`, or the equivalent `answer`/`message` wording
+are intercepted by the interface. Ulysses sends only the last displayed assistant text to the local summarizer, displays
+the result, and speaks it when voice is enabled. This path does not contact the configured LLM provider.
+
+```yaml
+sirina:
+  voice_summary_enabled: true
+  voice_summary_model: Falconsai/text_summarization
+  voice_summary_model_path: models/voice-summary
+  voice_summary_after_chars: 600
+  voice_summary_max_chars: 420
+  voice_summary_max_input_tokens: 480
+  voice_summary_max_chunks: 6
+  voice_summary_max_output_tokens: 96
+```
+
+The model repository and installation path can be overridden during installation with
+`ULYSSES_VOICE_SUMMARY_MODEL` and `ULYSSES_VOICE_SUMMARY_MODEL_PATH`. Runtime inference uses CUDA when the installed
+PyTorch runtime reports CUDA availability and otherwise uses CPU. The selected chat provider is not involved.
+
+Running `scripts/install-ulysses-linux --sync-only` on an existing installation now validates this model with local-only
+loading. A valid local model is reused without downloading; a missing or invalid model is downloaded and validated before
+the synchronized application starts. It also validates NumPy against Numba and installs the supported
+`numpy>=1.26,<2.5` range when necessary; this prevents F4 voice input from failing during Numba import.

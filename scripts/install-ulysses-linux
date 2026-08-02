@@ -301,6 +301,45 @@ prepare_models() {
   "${APP_HOME}/venv/bin/sirina" --model-dir "${MODEL_HOME}" download --group all
 }
 
+prepare_voice_summary_model() {
+  local config_file="${APP_SOURCE}/config/ulysses.yaml"
+  if [[ -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
+    config_file="${CONFIG_HOME}/ulysses.yaml"
+  fi
+  local configured_model configured_path
+  configured_model="$(awk '/^sirina:/ { active=1; next } active && /^[^[:space:]]/ { exit } active && $1 == "voice_summary_model:" { print $2; exit }' "${config_file}")"
+  configured_path="$(awk '/^sirina:/ { active=1; next } active && /^[^[:space:]]/ { exit } active && $1 == "voice_summary_model_path:" { print $2; exit }' "${config_file}")"
+  local model_id="${ULYSSES_VOICE_SUMMARY_MODEL:-${configured_model:-Falconsai/text_summarization}}"
+  local model_path="${ULYSSES_VOICE_SUMMARY_MODEL_PATH:-${configured_path:-${MODEL_HOME}/voice-summary}}"
+  if [[ "${model_path}" != /* ]]; then
+    model_path="${APP_SOURCE}/${model_path}"
+  fi
+  "${APP_HOME}/venv/bin/python" - "${model_id}" "${model_path}" <<'PY'
+import sys
+from pathlib import Path
+
+from huggingface_hub import snapshot_download
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+model_id = sys.argv[1]
+model_path = Path(sys.argv[2]).expanduser().resolve()
+model_path.mkdir(parents=True, exist_ok=True)
+try:
+    AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    AutoModelForSeq2SeqLM.from_pretrained(model_path, local_files_only=True)
+    raise SystemExit(0)
+except (OSError, ValueError):
+    pass
+snapshot_download(
+    repo_id=model_id,
+    local_dir=model_path,
+    allow_patterns=["*.json", "*.safetensors", "spiece.model", "tokenizer*", "special_tokens_map.json"],
+)
+AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+AutoModelForSeq2SeqLM.from_pretrained(model_path, local_files_only=True)
+PY
+}
+
 install_agent_dependencies() {
   # sentence-transformers depends on PyTorch. Installing it from PyPI on Linux
   # can pull in several gigabytes of CUDA libraries even though Ulysses runs its
@@ -326,6 +365,16 @@ install_agent_dependencies() {
   fi
 }
 
+ensure_voice_numeric_compatibility() {
+  if "${APP_HOME}/venv/bin/python" -c \
+    'import numba, numpy; major, minor = map(int, numpy.__version__.split(".")[:2]); raise SystemExit(0 if (major, minor) < (2, 5) else 1)' \
+    >/dev/null 2>&1; then
+    return 0
+  fi
+  "${APP_HOME}/venv/bin/python" -m pip install --upgrade "numpy>=1.26,<2.5"
+  "${APP_HOME}/venv/bin/python" -c 'import numba, numpy; print(f"NumPy {numpy.__version__} / Numba {numba.__version__}")'
+}
+
 run_animated "Preparing installation directories" prepare_directories
 run_animated "Synchronizing application source" sync_application
 
@@ -337,12 +386,16 @@ if [[ "${SYNC_ONLY}" == true ]]; then
     }
   }
   run_animated "Preserving existing environment and models" verify_existing_install
+  run_animated "Checking voice numeric-library compatibility" ensure_voice_numeric_compatibility
+  run_animated "Checking and preparing the local voice summarization model" prepare_voice_summary_model
 else
   run_animated "Validating Python 3.11+" validate_python
   run_animated "Preparing isolated Python environment" prepare_virtual_environment
   run_animated "Upgrading Python package tooling" "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip
   run_animated "Installing ${ONNX_DEVICE^^} inference runtime, Ulysses, and agent dependencies" install_agent_dependencies
+  run_animated "Checking voice numeric-library compatibility" ensure_voice_numeric_compatibility
   run_animated "Checking and preparing Sirina voice models" prepare_models
+  run_animated "Downloading and validating the local voice summarization model" prepare_voice_summary_model
 fi
 
 write_configuration() {

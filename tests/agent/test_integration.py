@@ -127,6 +127,37 @@ def test_long_voice_summary_is_derived_only_from_current_response(tmp_path):
     assert provider.calls == 0
 
 
+def test_long_voice_summary_uses_local_model_with_only_current_safe_response(tmp_path, monkeypatch):
+    cfg = UlyssesConfig()
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    provider = SecurityVoiceSummaryProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+    received = {}
+
+    class Summarizer:
+        def summarize(self, text):
+            received["text"] = text
+            return "The assessment found one important issue near the conclusion."
+
+    monkeypatch.setattr(
+        "sirina_agent.audio.local_summarizer.get_local_voice_summarizer",
+        lambda *args: Summarizer(),
+    )
+    response = (
+        "Initial background information. " * 50
+        + "```bash\nnmap --script vuln --reason example.test\n```\n"
+        + "Conclusion: one important issue requires remediation."
+    )
+
+    summary = agent.summarize_for_voice(response)
+
+    assert summary == "Summary: The assessment found one important issue near the conclusion."
+    assert "Conclusion" in received["text"]
+    assert "--script" not in received["text"]
+    assert provider.calls == 0
+
+
 class NarrateThenCommandProvider:
     def __init__(self):
         self.calls = 0
@@ -725,6 +756,11 @@ def test_show_report_is_not_routed_as_command_assignment():
     assert not AgentOrchestrator._is_command_assignment("show me the report")
     assert not AgentOrchestrator._is_command_assignment("open the latest report")
     assert not AgentOrchestrator._is_command_assignment("list all reports")
+
+
+def test_live_system_information_is_an_operational_request():
+    assert AgentOrchestrator._is_command_assignment("what time is it on the system")
+    assert AgentOrchestrator._is_command_assignment("show current system resources")
 
 
 def test_report_from_tool_result_requests_assessment_report_structure(tmp_path):

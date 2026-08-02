@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from datetime import datetime
 from itertools import cycle
+from pathlib import Path
 from threading import Thread
 
 from rich.console import Group
@@ -18,7 +19,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.events import Key, Paste
+from textual.events import Key, MouseUp, Paste
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Select, Static
 
@@ -60,6 +61,7 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
+from sirina_agent.core.tasks import TaskStore, format_tasks, parse_recurring_prompt
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
 from sirina_agent.mcp.client import SDKMCPClient
@@ -714,6 +716,8 @@ class UlyssesTextualApp(App):
         self.orchestrator = orchestrator
         self.voice_io = voice_io
         self.artifacts = ArtifactManager.from_config(orchestrator.config)
+        self.tasks = TaskStore(self.artifacts.runtime_dir / "tasks.json")
+        self._scheduled_task_running = False
         self.last_assistant_text = ""
         self.transcript_plain: list[str] = []
         self._last_user_text = ""
@@ -731,6 +735,7 @@ class UlyssesTextualApp(App):
         self.theme_name = getattr(orchestrator.config.tui, "theme", "ulysses_dark")
         self._waiting = False
         self._speaking = False
+        self._voice_preparing = False
         self._listening = False
         self._listen_cancel_requested = False
         self._speech_id = 0
@@ -798,6 +803,8 @@ class UlyssesTextualApp(App):
                     "/run <cmd>\n"
                     "/create-skill <name> <request>\n"
                     "/autonomous on|off\n"
+                    "/task add <schedule> :: <prompt>\n"
+                    "/tasks\n"
                     "/confirm [token]\n"
                     "/memory\n"
                     "/context\n"
@@ -833,6 +840,7 @@ class UlyssesTextualApp(App):
         self.set_interval(0.12, self._tick_spinner)
         self.set_interval(2.0, self._refresh_status)
         self.set_interval(1.0, self._maybe_collect_subagent_reports)
+        self.set_interval(1.0, self._maybe_run_scheduled_task)
         self.set_interval(self._autonomous_timer_seconds(), self._maybe_autonomous)
         self.query_one("#composer", Input).focus()
         if self.orchestrator.config.updates.enabled and self.orchestrator.config.updates.check_on_startup:
@@ -951,6 +959,32 @@ class UlyssesTextualApp(App):
             return
         if pending_paste is None and original_text.startswith("/"):
             self._command(original_text)
+            return
+        if re.fullmatch(
+            r"(?:please\s+)?summari[sz]e\s+(?:the\s+)?(?:last|previous)\s+(?:response|answer|message)",
+            original_text.strip(),
+            re.IGNORECASE,
+        ):
+            self._write_user(display_text)
+            if not self.last_assistant_text:
+                self._write_system("No previous assistant response is available.")
+                return
+            self._start_waiting()
+            Thread(target=self._local_summary_in_thread, args=(self.last_assistant_text,), daemon=True).start()
+            return
+        recurring = parse_recurring_prompt(original_text)
+        if recurring:
+            self._write_user(display_text)
+            try:
+                task = self.tasks.add(*recurring)
+            except ValueError as exc:
+                self._write_error(str(exc))
+            else:
+                self._write_system(
+                    f"Recurring task created: {task.id}\nSchedule: {task.schedule}\n"
+                    f"Next run: {task.next_run_at}\nPrompt: {task.prompt}"
+                )
+            self._refresh_status()
             return
         if self.orchestrator.pending_tool_requires_sudo_password():
             pending = self.orchestrator.pending_tool or {}
@@ -1312,6 +1346,14 @@ class UlyssesTextualApp(App):
             return
         self.call_from_thread(self._finish_answer, answer)
 
+    def _local_summary_in_thread(self, text: str) -> None:
+        try:
+            summary = self.orchestrator.summarize_for_voice(text, force=True)
+        except Exception as exc:
+            self.call_from_thread(self._finish_error, str(exc))
+            return
+        self.call_from_thread(self._finish_answer, summary)
+
     def _finish_error(self, error: str) -> None:
         self._stop_waiting()
         self._write_error(error)
@@ -1371,6 +1413,8 @@ class UlyssesTextualApp(App):
             return
         elif cmd == "/autonomous":
             self._autonomous_command(parts)
+        elif cmd in {"/task", "/tasks"}:
+            self._task_command(text, parts)
         elif cmd in {"/status", "/config"}:
             self.action_status()
         elif cmd == "/godmode":
@@ -1594,6 +1638,45 @@ class UlyssesTextualApp(App):
             self._start_autonomous_check(force=True)
         else:
             self._write_system("Usage: /autonomous on, /autonomous off, /autonomous now")
+
+    def _task_command(self, text: str, parts: list[str]) -> None:
+        action = parts[1].lower() if len(parts) > 1 and parts[0] == "/task" else "list"
+        if action in {"list", "status"}:
+            self._write_system(format_tasks(self.tasks.list()))
+            return
+        if action == "add":
+            specification = text.split("add", 1)[1].strip()
+            if "::" not in specification:
+                self._write_system("Usage: /task add <schedule> :: <prompt>")
+                return
+            schedule, prompt = (part.strip() for part in specification.split("::", 1))
+            try:
+                task = self.tasks.add(schedule, prompt)
+            except ValueError as exc:
+                self._write_error(str(exc))
+                return
+            self._write_system(f"Recurring task created: {task.id}\nNext run: {task.next_run_at}")
+            return
+        if len(parts) < 3:
+            self._write_system("Usage: /task add|list|pause|resume|delete|run")
+            return
+        task_id = parts[2]
+        if action == "pause":
+            task = self.tasks.update_enabled(task_id, False)
+            self._write_system(f"Paused {task_id}." if task else "Task not found.")
+        elif action == "resume":
+            task = self.tasks.update_enabled(task_id, True)
+            self._write_system(f"Resumed {task_id}." if task else "Task not found.")
+        elif action == "delete":
+            self._write_system(f"Deleted {task_id}." if self.tasks.delete(task_id) else "Task not found.")
+        elif action == "run":
+            task = next((item for item in self.tasks.list() if item.id == task_id), None)
+            if task and not self._scheduled_task_running:
+                self._start_scheduled_task(task)
+            else:
+                self._write_system("Task not found or another scheduled task is running.")
+        else:
+            self._write_system("Usage: /task add|list|pause|resume|delete|run")
         self._refresh_status()
 
     def action_new_session(self) -> None:
@@ -2139,14 +2222,35 @@ class UlyssesTextualApp(App):
     def action_selection_mode(self) -> None:
         self._set_selection_mode(not self.selection_mode)
 
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if event.button != 1:
+            return
+        self.set_timer(0.03, self._copy_mouse_selection)
+
+    def _copy_mouse_selection(self) -> None:
+        selected = self._selected_text()
+        if not selected:
+            return
+        try:
+            self.copy_to_clipboard(selected)
+        except Exception:
+            pass
+        if _set_system_clipboard_text(selected):
+            self.notify("Selection copied to the system clipboard.", timeout=1.5)
+        else:
+            self.notify(
+                "Selection copied inside Ulysses; install xclip or wl-clipboard for the system clipboard.",
+                severity="warning",
+                timeout=3,
+            )
+
     def _set_selection_mode(self, enabled: bool) -> None:
         self.selection_mode = enabled
         if enabled:
             self.query_one("#composer", Input).blur()
-            _set_terminal_mouse_capture(self, False)
+            _set_terminal_mouse_capture(self, True)
             self._write_system(
-                "Selection mode: on. Mouse selection is released to the terminal. "
-                "Drag-select text, then copy with Ctrl+Shift+C or your terminal shortcut."
+                "Selection mode: on. Drag over text and release the left mouse button to copy it automatically."
             )
         else:
             _set_terminal_mouse_capture(self, True)
@@ -2187,6 +2291,8 @@ class UlyssesTextualApp(App):
         autonomous = "on" if self.orchestrator.autonomous_enabled() else "off"
         active_skill = getattr(self.orchestrator, "active_skill", None) or "idle"
         context = self.orchestrator.context_usage()
+        recurring_tasks = self.tasks.list()
+        enabled_tasks = sum(1 for task in recurring_tasks if task.enabled)
         gauge = _gauge(context["percent"])
         self.query_one("#status", Static).update(
             f"Session\n{self.orchestrator.session_id}\n\n"
@@ -2195,11 +2301,12 @@ class UlyssesTextualApp(App):
             f"{context['estimated_tokens']}/{context['context_window_tokens']} tok\n\n"
             f"Voice\n{voice}\n\n"
             f"Connector: {connector_state}\n\n"
-            f"Activity\n{self._activity_text if self._waiting or self._speaking or self._listening else 'idle'}\n\n"
+            f"Activity\n{self._activity_text if self._waiting or self._speaking or self._voice_preparing or self._listening or self._scheduled_task_running else 'idle'}\n\n"
             f"Active skill\n{active_skill}\n\n"
             f"Sub-agents\n{self.orchestrator.subagents.summary() if self.orchestrator.subagents else 'disabled'}\n\n"
             f"MCP\n{self.orchestrator.mcp.status_detail() if self.orchestrator.mcp else 'disabled'}\n\n"
             f"Autonomous\n{autonomous}\n\n"
+            f"Tasks\n{enabled_tasks} enabled / {len(recurring_tasks)} total\n\n"
             f"Update\n{self.updates.status.state}\n\n"
             f"Theme\n{self.theme_name}"
         )
@@ -2244,6 +2351,34 @@ class UlyssesTextualApp(App):
 
     def _maybe_autonomous(self) -> None:
         self._start_autonomous_check(force=False)
+
+    def _maybe_run_scheduled_task(self) -> None:
+        if self._scheduled_task_running or self._waiting:
+            return
+        due = self.tasks.due()
+        if due:
+            self._start_scheduled_task(due[0])
+
+    def _start_scheduled_task(self, task) -> None:
+        self.tasks.mark_started(task.id)
+        self._scheduled_task_running = True
+        self._set_activity(f"recurring task {task.id}: {task.prompt}")
+        Thread(target=self._scheduled_task_in_thread, args=(task.id, task.prompt), daemon=True).start()
+
+    def _scheduled_task_in_thread(self, task_id: str, prompt: str) -> None:
+        try:
+            result = self.orchestrator.handle_text(prompt)
+        except Exception as exc:
+            result = f"Failed: {exc}"
+        self.tasks.mark_finished(task_id, result)
+        self.call_from_thread(self._finish_scheduled_task, task_id, result)
+
+    def _finish_scheduled_task(self, task_id: str, result: str) -> None:
+        self._scheduled_task_running = False
+        self._activity_text = "idle"
+        self._write_system(f"Recurring task completed: {task_id}")
+        self._write_assistant(result)
+        self._refresh_status()
 
     def _maybe_collect_subagent_reports(self) -> None:
         manager = getattr(self.orchestrator, "subagents", None)
@@ -2316,7 +2451,7 @@ class UlyssesTextualApp(App):
         if self._speaking:
             self._logo_frame_index = (self._logo_frame_index + 1) % len(ULYSSES_SPEAKING_LOGOS)
             self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[self._logo_frame_index])
-        active = self._waiting or self._speaking or self._listening
+        active = self._waiting or self._speaking or self._voice_preparing or self._listening or self._scheduled_task_running
         if active:
             frame = next(self._spinner)
             label = self._activity_label()
@@ -2343,7 +2478,7 @@ class UlyssesTextualApp(App):
         if message != self._activity_text:
             self._activity_started_at = time.monotonic()
         self._activity_text = message
-        if self._waiting or self._speaking or self._listening:
+        if self._waiting or self._speaking or self._voice_preparing or self._listening or self._scheduled_task_running:
             self.query_one("#spinner", Static).update(
                 self._activity_renderable(next(self._spinner), self._activity_label())
             )
@@ -2407,6 +2542,7 @@ class UlyssesTextualApp(App):
         speech_id = self._speech_id
         self.voice_io.interrupt()
         self._speaking = False
+        self._voice_preparing = True
         self._activity_text = "preparing voice"
         self.query_one("#spinner", Static).update(
             self._activity_renderable(next(self._spinner), "Ulysses: preparing voice")
@@ -2434,6 +2570,7 @@ class UlyssesTextualApp(App):
     def _start_speaking_ui(self, speech_id: int) -> None:
         if speech_id != self._speech_id:
             return
+        self._voice_preparing = False
         self._speaking = True
         self._logo_frame_index = 0
         self.query_one("#logo", Static).update(ULYSSES_SPEAKING_LOGOS[0])
@@ -2452,6 +2589,7 @@ class UlyssesTextualApp(App):
         self._refresh_status()
 
     def _stop_speaking_ui(self) -> None:
+        self._voice_preparing = False
         self._speaking = False
         self._logo_frame_index = 0
         self.query_one("#logo", Static).update(ULYSSES_SIDEBAR_LOGO)
@@ -2496,19 +2634,10 @@ def _gauge(percent: int, width: int = 14) -> str:
 
 
 def _system_clipboard_text() -> str:
-    commands = (
-        ["wl-paste", "--no-newline"],
-        ["xclip", "-selection", "clipboard", "-o"],
-        ["xsel", "--clipboard", "--output"],
-        ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
-    )
-    for command in commands:
-        executable = shutil.which(command[0])
-        if executable is None:
-            continue
+    for _, read_command in _clipboard_command_pairs():
         try:
             result = subprocess.run(
-                [executable, *command[1:]],
+                read_command,
                 capture_output=True,
                 text=True,
                 timeout=2,
@@ -2522,21 +2651,35 @@ def _system_clipboard_text() -> str:
 
 
 def _system_clipboard_backend() -> str | None:
+    pairs = _clipboard_command_pairs()
+    if pairs:
+        return Path(pairs[0][0][0]).name
+    return None
+
+
+def _clipboard_command_pairs() -> list[tuple[list[str], list[str]]]:
     session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    candidates = (
-        ("wl-paste", "wayland"),
-        ("xclip", "x11"),
-        ("xsel", "x11"),
-        ("powershell.exe", "windows"),
-    )
-    for command, backend in candidates:
+    candidates = [
+        ("wayland", ["wl-copy"], ["wl-paste", "--no-newline"]),
+        ("x11", ["xclip", "-selection", "clipboard"], ["xclip", "-selection", "clipboard", "-o"]),
+        ("x11", ["xsel", "--clipboard", "--input"], ["xsel", "--clipboard", "--output"]),
+        (
+            "windows",
+            ["powershell.exe", "-NoProfile", "-Command", "$input | Set-Clipboard"],
+            ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+        ),
+    ]
+    pairs = []
+    for backend, write_command, read_command in candidates:
         if backend == "wayland" and session_type == "x11":
             continue
         if backend == "x11" and session_type == "wayland" and not os.environ.get("DISPLAY"):
             continue
-        if shutil.which(command):
-            return command
-    return None
+        writer = shutil.which(write_command[0])
+        reader = shutil.which(read_command[0])
+        if writer and reader:
+            pairs.append(([writer, *write_command[1:]], [reader, *read_command[1:]]))
+    return pairs
 
 
 _clipboard_owner_process: subprocess.Popen[str] | None = None
@@ -2544,19 +2687,10 @@ _clipboard_owner_process: subprocess.Popen[str] | None = None
 
 def _set_system_clipboard_text(text: str) -> bool:
     global _clipboard_owner_process
-    commands = [
-        ["wl-copy"],
-        ["xclip", "-selection", "clipboard"],
-        ["xsel", "--clipboard", "--input"],
-        ["powershell.exe", "-NoProfile", "-Command", "Set-Clipboard"],
-    ]
-    for command in commands:
-        executable = shutil.which(command[0])
-        if executable is None:
-            continue
+    for write_command, read_command in _clipboard_command_pairs():
         try:
             result = subprocess.run(
-                [executable, *command[1:]],
+                write_command,
                 input=text,
                 capture_output=True,
                 text=True,
@@ -2566,7 +2700,18 @@ def _set_system_clipboard_text(text: str) -> bool:
         except (OSError, subprocess.SubprocessError):
             continue
         if result.returncode == 0:
-            return True
+            try:
+                verified = subprocess.run(
+                    read_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if verified.returncode == 0 and verified.stdout.rstrip("\r\n") == text.rstrip("\r\n"):
+                return True
 
     python = shutil.which("python3")
     if python is None or not os.environ.get("DISPLAY"):
