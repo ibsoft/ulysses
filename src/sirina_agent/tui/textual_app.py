@@ -798,7 +798,6 @@ class UlyssesTextualApp(App):
                     "/run <cmd>\n"
                     "/create-skill <name> <request>\n"
                     "/autonomous on|off\n"
-                    "/***autonomous on|off\n"
                     "/confirm [token]\n"
                     "/memory\n"
                     "/context\n"
@@ -1370,7 +1369,7 @@ class UlyssesTextualApp(App):
                 daemon=True,
             ).start()
             return
-        elif cmd in {"/autonomous", "/***autonomous"}:
+        elif cmd == "/autonomous":
             self._autonomous_command(parts)
         elif cmd in {"/status", "/config"}:
             self.action_status()

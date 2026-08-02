@@ -647,6 +647,9 @@ reach the normal command-policy timeout.
 
 Reports can be retrieved locally with `show reports`, `show report 2`, `show the latest report`, or
 `show report for <target>`. An active assessment's report is preferred when no selector is supplied.
+
+When active context reaches `context.rollover_threshold_percent` (100% by default), Ulysses automatically summarizes the older history, creates a continuation session,
+copies the most recent messages into it, and switches to that new session with the summary carried forward.
 - `logging`: structured runtime and security audit logs.
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.

@@ -52,6 +52,7 @@ memory:
 context:
   auto_consolidate: true
   context_window_tokens: 128000
+  rollover_threshold_percent: 100
   max_messages: 40
   max_chars: 24000
   keep_last_messages: 12

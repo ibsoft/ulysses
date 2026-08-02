@@ -348,7 +348,7 @@ class RichTUI:
             with self.console.status("[bold cyan]Researching and building skill...[/bold cyan]", spinner="dots"):
                 result = self.orchestrator._run_skill("create_skill", {"name": name, "request": request})
             self.console.print(Panel(result, title="Skill proposal"))
-        elif cmd in {"/autonomous", "/***autonomous"}:
+        elif cmd == "/autonomous":
             if len(parts) > 1 and parts[1].lower() in {"on", "off"}:
                 enabled = parts[1].lower() == "on"
                 self.orchestrator.set_autonomous(enabled)

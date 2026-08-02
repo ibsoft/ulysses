@@ -58,6 +58,7 @@ class MemoryConfig(BaseModel):
 class ContextConfig(BaseModel):
     auto_consolidate: bool = True
     context_window_tokens: int = 128_000
+    rollover_threshold_percent: int = Field(default=100, ge=1, le=100)
     max_messages: int = 40
     max_chars: int = 24_000
     keep_last_messages: int = 12

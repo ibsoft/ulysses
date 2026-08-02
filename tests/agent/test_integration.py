@@ -809,22 +809,40 @@ def test_system_prompt_uses_config_and_prompt_file(tmp_path):
 
 def test_session_auto_consolidates_large_context(tmp_path):
     cfg = UlyssesConfig()
-    cfg.context.max_messages = 3
+    cfg.context.context_window_tokens = 20
     cfg.context.keep_last_messages = 2
-    cfg.context.max_chars = 10_000
     sessions = SessionStore(tmp_path / "s.sqlite3")
     memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
     provider = RecordingProvider()
     agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+    original_session_id = agent.session_id
     for idx in range(4):
-        sessions.add_message(agent.session_id, "user", f"older {idx}")
+        sessions.add_message(agent.session_id, "user", f"older {idx} " + "x" * 100)
     answer = agent.handle_text("new message")
     assert answer == "final answer"
+    assert agent.session_id != original_session_id
     metadata = sessions.session_metadata(agent.session_id)
     assert metadata["summary"] == "summary of older context"
     assert sessions.message_count(agent.session_id) <= cfg.context.keep_last_messages + 1
     final_call = provider.calls[-1]
     assert any("Consolidated session context" in message["content"] for message in final_call)
+
+
+def test_low_context_does_not_consolidate_only_because_message_limit_is_exceeded(tmp_path):
+    cfg = UlyssesConfig()
+    cfg.context.max_messages = 1
+    cfg.context.context_window_tokens = 128_000
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    provider = RecordingProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+    for idx in range(3):
+        sessions.add_message(agent.session_id, "user", f"short {idx}")
+
+    agent.handle_text("hello")
+
+    assert agent.context_usage()["percent"] < cfg.context.rollover_threshold_percent
+    assert not sessions.session_metadata(agent.session_id).get("summary")
 
 
 def test_context_usage_and_window_triggered_consolidation(tmp_path):
@@ -837,11 +855,15 @@ def test_context_usage_and_window_triggered_consolidation(tmp_path):
     memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
     provider = RecordingProvider()
     agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
+    original_session_id = agent.session_id
     sessions.add_message(agent.session_id, "user", "x" * 500)
     usage = agent.context_usage()
     assert usage["percent"] == 100
     agent.handle_text("trigger")
+    assert agent.session_id != original_session_id
     assert sessions.session_metadata(agent.session_id)["summary"] == "summary of older context"
+    assert sessions.session_metadata(agent.session_id)["continued_from_session"] == original_session_id
+    assert sessions.session_metadata(original_session_id)["continued_in_session"] == agent.session_id
 
 
 def test_autonomous_check_persists_report_to_session_and_memory(tmp_path):
