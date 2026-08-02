@@ -1,5 +1,6 @@
 import os
 
+import httpx
 import pytest
 
 from sirina_agent.config.loader import load_config
@@ -159,3 +160,73 @@ def test_required_tool_request_rejects_missing_tool():
 
     with pytest.raises(LLMProviderError, match="Required tool is not available"):
         provider.complete_with_required_tool([], [], "system_command")
+
+
+def test_brief_completion_caps_output_and_uses_short_timeout(monkeypatch):
+    provider = OpenAICompatibleProvider("https://api.example", "model", "secret", timeout_seconds=60)
+    captured = {}
+
+    def fake_post(payload, allow_tool_fallback=False, timeout_seconds=None):
+        captured.update(payload)
+        captured["timeout_seconds"] = timeout_seconds
+        return {"choices": [{"message": {"content": "Ready."}}]}
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+
+    provider.complete_brief([{"role": "user", "content": "Greet me."}], max_tokens=64, timeout_seconds=10)
+
+    assert captured["max_tokens"] == 64
+    assert captured["timeout_seconds"] == 10
+
+
+def test_brief_required_tool_call_uses_network_planning_timeout(monkeypatch):
+    provider = OpenAICompatibleProvider("https://api.example", "model", "secret", timeout_seconds=60)
+    captured = {}
+
+    def fake_post(payload, allow_tool_fallback=False, timeout_seconds=None):
+        captured.update(payload)
+        captured["timeout_seconds"] = timeout_seconds
+        return {"choices": [{"message": {"tool_calls": []}}]}
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    tool = {"type": "function", "function": {"name": "system_command", "parameters": {"type": "object"}}}
+
+    provider.complete_with_required_tool_brief(
+        [{"role": "user", "content": "scan example.com"}],
+        [tool],
+        "system_command",
+        timeout_seconds=15,
+    )
+
+    assert captured["tool_choice"]["function"]["name"] == "system_command"
+    assert captured["timeout_seconds"] == 15
+
+
+def test_required_tool_adapts_when_endpoint_rejects_forced_tool_choice(monkeypatch):
+    provider = OpenAICompatibleProvider("https://api.example", "any-model", "secret")
+    payloads = []
+
+    def fake_http_post(url, **kwargs):
+        payloads.append(kwargs["json"])
+        request = httpx.Request("POST", url)
+        if len(payloads) == 1:
+            return httpx.Response(
+                400,
+                request=request,
+                json={"error": {"message": "forced tool selection is incompatible with current mode"}},
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={"choices": [{"message": {"tool_calls": []}}]},
+        )
+
+    monkeypatch.setattr("sirina_agent.llm.providers.httpx.post", fake_http_post)
+    tool = {"type": "function", "function": {"name": "dynamic_tool", "parameters": {"type": "object"}}}
+
+    provider.complete_with_required_tool([{"role": "user", "content": "perform task"}], [tool], "dynamic_tool")
+
+    assert payloads[0]["tool_choice"]["function"]["name"] == "dynamic_tool"
+    assert "tool_choice" not in payloads[1]
+    assert payloads[1]["tools"] == [tool]
+    assert "dynamic_tool" in payloads[1]["messages"][-1]["content"]

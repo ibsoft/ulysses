@@ -12,6 +12,8 @@ class LLMConfig(BaseModel):
     base_url: str = "https://api.openai.com/v1"
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = 60.0
+    startup_greeting_timeout_seconds: float = Field(default=10.0, ge=2.0, le=30.0)
+    network_planning_timeout_seconds: float = Field(default=15.0, ge=5.0, le=60.0)
 
 
 class AudioConfig(BaseModel):

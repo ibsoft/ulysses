@@ -85,6 +85,61 @@ class ArtifactManager:
         )
         return sorted(files, key=lambda path: path.stat().st_mtime, reverse=True)[:limit]
 
+    def latest_report(self) -> Path | None:
+        reports = [path for path in self.list_downloads() if path.suffix.lower() == ".md"]
+        return reports[0] if reports else None
+
+    def resolve_report(self, request: str, active_project: AssessmentProject | None = None) -> tuple[Path | None, str]:
+        reports = [path for path in self.list_downloads() if path.suffix.lower() == ".md"]
+        if not reports:
+            return None, "No saved report was found."
+
+        numbered = re.search(r"\breport\s+(\d+)\b", request, re.IGNORECASE)
+        if numbered:
+            index = int(numbered.group(1)) - 1
+            if 0 <= index < len(reports):
+                return reports[index], ""
+            return None, f"Report {index + 1} does not exist.\n\n{self.format_report_list(reports)}"
+
+        target = re.search(r"\breport\s+(?:for|of)\s+([^?]+)", request, re.IGNORECASE)
+        if target:
+            query = target.group(1).strip().lower()
+            matches = [path for path in reports if self._report_matches(path, query)]
+            if matches:
+                return matches[0], ""
+            return None, f"No report matching {query!r} was found.\n\n{self.format_report_list(reports)}"
+
+        if re.search(r"\b(?:list|show|display)\s+(?:me\s+)?(?:all\s+)?reports\b", request, re.IGNORECASE):
+            return None, self.format_report_list(reports)
+        if re.search(r"\blatest\s+report\b", request, re.IGNORECASE):
+            return reports[0], ""
+        if active_project is not None:
+            project_reports = [path for path in reports if path.parent == active_project.reports_dir]
+            if project_reports:
+                return project_reports[0], ""
+        if len(reports) == 1:
+            return reports[0], ""
+        return None, "Several reports are available. Choose a report number or target.\n\n" + self.format_report_list(reports)
+
+    @staticmethod
+    def format_report_list(reports: list[Path]) -> str:
+        lines = ["Saved reports (newest first):"]
+        for index, path in enumerate(reports, start=1):
+            modified = datetime.fromtimestamp(path.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
+            project = path.parent.parent.name if path.parent.name == "reports" else path.parent.name
+            lines.append(f"{index}. {modified} — {project}\n   {path}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _report_matches(path: Path, query: str) -> bool:
+        searchable = f"{path.name} {path.parent.parent.name}".lower()
+        request_file = path.parent.parent / "artifacts" / "request.txt"
+        try:
+            searchable += " " + request_file.read_text(encoding="utf-8").lower()
+        except OSError:
+            pass
+        return query in searchable
+
     def _write(self, directory_name: str, session_id: str, label: str, suffix: str, content: str) -> Artifact:
         directory = self.runtime_dir / directory_name
         directory.mkdir(parents=True, exist_ok=True)

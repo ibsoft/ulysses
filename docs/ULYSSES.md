@@ -447,6 +447,19 @@ Without that extra, Ulysses still runs text-only and Sirina VAD/push-to-talk sty
 Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI API keys, OpenAI-Codex login, Kimi / Moonshot, and local Ollama. Kimi defaults to model `kimi-k2.7-code` at `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key.
 The preferred-name question appears only after the first successful provider setup on a new installation. Completion is
 persisted under `tui.name_prompt_completed`, preventing later provider changes from displaying or speaking it again.
+Startup greetings use a separate bounded request: at most 64 output tokens and the configurable
+`llm.startup_greeting_timeout_seconds` timeout (10 seconds by default). If the provider is slower or unavailable, Ulysses
+then selects a local fallback greeting; normal user requests retain the general `llm.timeout_seconds` value.
+Operational external-network requests use a separate `llm.network_planning_timeout_seconds` value (15 seconds by
+default). They request `system_command` on the first LLM call, execute only the first returned command, and return its
+output without another LLM/tool round.
+During execution, the TUI shows the complete command, an animated activity indicator, and live elapsed seconds. Ulysses
+does not substitute scan flags or rewrite a network command after the LLM selects it.
+
+Saved-report navigation is local and provider-independent. `show reports` lists reports newest first, `show report 2`
+selects by list number, `show the latest report` selects the newest, and `show report for <target>` selects the newest
+matching assessment. Within an active assessment, `show me the report` prefers that project's newest report; otherwise an
+ambiguous request displays the list instead of guessing.
 
 ## Providers
 

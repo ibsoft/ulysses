@@ -53,6 +53,19 @@ class OpenAICompatibleProvider:
             payload["tools"] = tools
         return self._post(payload, allow_tool_fallback=bool(tools))
 
+    def complete_brief(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int = 64,
+        timeout_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        """Run a bounded request for nonessential short UI text."""
+        return self._post(
+            {"model": self.model, "messages": messages, "max_tokens": max_tokens},
+            timeout_seconds=timeout_seconds,
+        )
+
     def complete_with_required_tool(
         self,
         messages: list[dict[str, str]],
@@ -76,17 +89,70 @@ class OpenAICompatibleProvider:
             allow_tool_fallback=False,
         )
 
-    def _post(self, payload: dict[str, Any], allow_tool_fallback: bool = False) -> dict[str, Any]:
+    def complete_with_required_tool_brief(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        tool_name: str,
+        *,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        selected_tools = [
+            tool
+            for tool in tools
+            if isinstance(tool.get("function"), dict) and tool["function"].get("name") == tool_name
+        ]
+        if not selected_tools:
+            raise LLMProviderError(f"Required tool is not available: {tool_name}")
+        return self._post(
+            {
+                "model": self.model,
+                "messages": messages,
+                "tools": selected_tools,
+                "tool_choice": {"type": "function", "function": {"name": tool_name}},
+            },
+            allow_tool_fallback=False,
+            timeout_seconds=timeout_seconds,
+        )
+
+    def _post(
+        self,
+        payload: dict[str, Any],
+        allow_tool_fallback: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}"},
             json=payload,
-            timeout=self.timeout_seconds,
+            timeout=self.timeout_seconds if timeout_seconds is None else timeout_seconds,
         )
+        if response.status_code == 400 and "tool_choice" in payload:
+            fallback = dict(payload)
+            fallback.pop("tool_choice", None)
+            fallback_messages = list(fallback.get("messages") or [])
+            selected_tools = fallback.get("tools") or []
+            selected_names = [
+                str(tool.get("function", {}).get("name"))
+                for tool in selected_tools
+                if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+            ]
+            if selected_names:
+                fallback_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "This request requires a tool call. Call the supplied tool now and return its arguments; "
+                            "do not answer with explanatory text. Required tool: " + selected_names[0]
+                        ),
+                    }
+                )
+                fallback["messages"] = fallback_messages
+            return self._post(fallback, allow_tool_fallback=False, timeout_seconds=timeout_seconds)
         if response.status_code == 400 and allow_tool_fallback:
             fallback = dict(payload)
             fallback.pop("tools", None)
-            return self._post(fallback, allow_tool_fallback=False)
+            return self._post(fallback, allow_tool_fallback=False, timeout_seconds=timeout_seconds)
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:

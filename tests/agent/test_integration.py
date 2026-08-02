@@ -673,21 +673,58 @@ def test_orchestrator_plans_disk_and_filesystem_commands_then_summarizes(tmp_pat
     assert "$ lsblk" in final_prompt
 
 
-def test_orchestrator_plans_nmap_os_version_then_summarizes(tmp_path):
+def test_external_network_task_uses_one_bounded_tool_batch_without_final_llm_call(tmp_path):
+    class NetworkToolProvider:
+        def __init__(self):
+            self.required_calls = 0
+            self.complete_calls = 0
+
+        def complete(self, messages, tools=None):
+            self.complete_calls += 1
+            raise AssertionError("external network task should not use a general or final LLM call")
+
+        def complete_with_required_tool(self, messages, tools, tool_name):
+            self.required_calls += 1
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": f'{{"command": "network-check-{index} example.com"}}',
+                                    }
+                                }
+                                for index in range(5)
+                            ]
+                        }
+                    }
+                ]
+            }
+
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
     memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
     registry = SkillRegistry()
     registry.register(StaticCommandSkill())
-    provider = RecordingProvider()
+    provider = NetworkToolProvider()
     agent = AgentOrchestrator(cfg, sessions, memory, provider, registry)
 
-    answer = agent.handle_text("run nmap to 192.168.7.33 and report OS version")
+    answer = agent.handle_text("scan the external network host example.com")
 
-    assert answer == "final answer"
+    assert provider.required_calls == 1
+    assert provider.complete_calls == 0
+    assert "network-check-0" in answer
+    assert "network-check-1" not in answer
     tool_messages = [message for message in sessions.messages(agent.session_id) if message.role == "tool"]
-    assert [message.metadata["planned_command"] for message in tool_messages] == ["nmap -O 192.168.7.33"]
-    assert "$ nmap -O 192.168.7.33" in provider.calls[-1][-1]["content"]
+    assert len(tool_messages) == 1
+
+
+def test_show_report_is_not_routed_as_command_assignment():
+    assert not AgentOrchestrator._is_command_assignment("show me the report")
+    assert not AgentOrchestrator._is_command_assignment("open the latest report")
+    assert not AgentOrchestrator._is_command_assignment("list all reports")
 
 
 def test_report_from_tool_result_requests_assessment_report_structure(tmp_path):

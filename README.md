@@ -629,7 +629,10 @@ The default config lives at `config/ulysses.yaml`.
 
 Important sections:
 
-- `llm`: provider, model, base URL, and API key environment variable.
+- `llm`: provider, model, base URL, API key environment variable, and the bounded startup-greeting timeout. The default
+  `startup_greeting_timeout_seconds: 10` uses a local fallback greeting when a remote provider is slow. External-network
+  command planning uses `network_planning_timeout_seconds: 15`, one command execution, and no final
+  LLM summarization call.
 - `audio`: microphone/speaker device selection and VAD timing.
 - `wake_word`: wake-word behavior and thresholds.
 - `sirina`: STT engine, TTS voice, and ONNX device selection (`auto`, `cpu`, or `cuda`).
@@ -637,6 +640,13 @@ Important sections:
 - `context`: automatic session consolidation.
 - `skills`: internet search and local command policy.
 - `mcp`: optional external tool servers, transport policy, allowlists, limits, and artifact storage.
+
+While a command is executing, the TUI keeps the selected command unchanged and displays its full text with an animated
+activity indicator and live elapsed time. Long-running network tools therefore remain visibly active until they finish or
+reach the normal command-policy timeout.
+
+Reports can be retrieved locally with `show reports`, `show report 2`, `show the latest report`, or
+`show report for <target>`. An active assessment's report is preferred when no selector is supplied.
 - `logging`: structured runtime and security audit logs.
 - `prompt`: agent personality, inline instructions, and system prompt path.
 - `privacy`: log redaction and memory retrieval controls.

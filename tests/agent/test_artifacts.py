@@ -29,6 +29,47 @@ def test_markdown_report_is_saved_as_md(tmp_path):
     assert artifact.path.suffix == ".md"
     assert artifact.path.parent == tmp_path / "reports"
     assert artifact.path.read_text(encoding="utf-8").startswith("# Report")
+    assert manager.latest_report() == artifact.path
+
+
+def test_latest_report_returns_none_when_no_report_exists(tmp_path):
+    assert ArtifactManager(tmp_path).latest_report() is None
+
+
+def test_resolve_report_lists_ambiguous_reports_and_selects_number(tmp_path):
+    manager = ArtifactManager(tmp_path)
+    first = manager.save_markdown_report("sess_1", "# First")
+    second = manager.save_markdown_report("sess_2", "# Second")
+
+    selected, guidance = manager.resolve_report("show me the report")
+    numbered, _ = manager.resolve_report("show report 2")
+
+    assert selected is None
+    assert "Several reports are available" in guidance
+    assert numbered == first.path
+    assert second.path in manager.list_downloads()
+
+
+def test_resolve_report_prefers_active_project(tmp_path):
+    manager = ArtifactManager(tmp_path)
+    manager.save_markdown_report("sess_1", "# Other")
+    project = manager.create_assessment_project("sess_1", "scan example.test")
+    active = manager.save_project_markdown_report(project, "# Active")
+
+    selected, guidance = manager.resolve_report("show me the report", project)
+
+    assert selected == active.path
+    assert guidance == ""
+
+
+def test_resolve_report_matches_assessment_target(tmp_path):
+    manager = ArtifactManager(tmp_path)
+    project = manager.create_assessment_project("sess_1", "assess example.test")
+    expected = manager.save_project_markdown_report(project, "# Target")
+
+    selected, _ = manager.resolve_report("show report for example.test")
+
+    assert selected == expected.path
 
 
 def test_assessment_project_has_standard_folders_and_report(tmp_path):

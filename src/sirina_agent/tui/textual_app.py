@@ -735,6 +735,7 @@ class UlyssesTextualApp(App):
         self._listen_cancel_requested = False
         self._speech_id = 0
         self._activity_text = "thinking"
+        self._activity_started_at = time.monotonic()
         self._spinner = cycle(self.ACTIVITY_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
@@ -869,6 +870,8 @@ class UlyssesTextualApp(App):
                 self._speak(guidance)
                 self.set_timer(0.4, self.action_setup)
             else:
+                self._start_waiting()
+                self._set_activity("calling LLM Brain for startup greeting")
                 Thread(target=self._startup_greeting_in_thread, daemon=True).start()
             return
         completed = min(5, int(elapsed / 0.36))
@@ -877,12 +880,22 @@ class UlyssesTextualApp(App):
         self.query_one("#boot-status", Static).update(_boot_progress(self._boot_message, completed, frame))
 
     def _startup_greeting_in_thread(self) -> None:
-        greeting = self.orchestrator.startup_greeting()
+        try:
+            greeting = self.orchestrator.startup_greeting()
+        except Exception as exc:
+            self.call_from_thread(self._finish_startup_greeting_error, str(exc))
+            return
         self.call_from_thread(self._deliver_startup_greeting, greeting)
 
     def _deliver_startup_greeting(self, greeting: str) -> None:
+        self._stop_waiting()
         self._write_assistant(greeting)
         self._speak(f"{self._boot_spoken_message} {greeting}")
+
+    def _finish_startup_greeting_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Startup greeting failed: {error}")
+        self._refresh_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -943,6 +956,19 @@ class UlyssesTextualApp(App):
         if self.orchestrator.pending_tool_requires_sudo_password():
             pending = self.orchestrator.pending_tool or {}
             self._open_sudo_password_dialog(pending.get("token"))
+            return
+        if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", original_text, re.I):
+            self._write_user(display_text)
+            report_path, guidance = self.artifacts.resolve_report(original_text, self._assessment_project)
+            if report_path is None:
+                self._write_system(guidance)
+            else:
+                try:
+                    report = report_path.read_text(encoding="utf-8")
+                    self._write_assistant(f"{report}\n\nLoaded report:\n{report_path}")
+                except OSError as exc:
+                    self._write_error(f"Report could not be opened: {exc}")
+            self._refresh_status()
             return
         new_assessment = is_assessment_request(original_text)
         assessment_request = new_assessment or (
@@ -2299,7 +2325,8 @@ class UlyssesTextualApp(App):
             self.query_one("#spinner", Static).update(message)
 
     def _activity_label(self) -> str:
-        return f"Ulysses: {self._activity_text}"
+        elapsed = max(0, int(time.monotonic() - self._activity_started_at))
+        return f"Ulysses: {self._activity_text} [{elapsed}s]"
 
     @staticmethod
     def _activity_renderable(frame: str, label: str, gap: str = " ") -> Text:
@@ -2309,9 +2336,13 @@ class UlyssesTextualApp(App):
         try:
             self.call_from_thread(self._set_activity, message)
         except RuntimeError:
+            if message != self._activity_text:
+                self._activity_started_at = time.monotonic()
             self._activity_text = message
 
     def _set_activity(self, message: str) -> None:
+        if message != self._activity_text:
+            self._activity_started_at = time.monotonic()
         self._activity_text = message
         if self._waiting or self._speaking or self._listening:
             self.query_one("#spinner", Static).update(

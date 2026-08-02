@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import replace
 from threading import Thread
 
@@ -93,7 +94,11 @@ class RichTUI:
             self._speak(guidance)
             self._setup_provider()
         else:
-            greeting = self.orchestrator.startup_greeting()
+            with self.console.status(
+                "[bold magenta]Calling LLM Brain for startup greeting...[/bold magenta]",
+                spinner="dots",
+            ):
+                greeting = self.orchestrator.startup_greeting()
             self.console.print(Panel(greeting, title="Ulysses"))
             self._speak(f"{spoken_startup_brief(self.orchestrator, self.voice_io)} {greeting}")
         self.connectors.start_all()
@@ -113,6 +118,17 @@ class RichTUI:
             if text.startswith("/"):
                 if self._command(text):
                     break
+                continue
+            if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", text, re.I):
+                report_path, guidance = self.artifacts.resolve_report(text, self._assessment_project)
+                if report_path is None:
+                    self.console.print(Panel(guidance, title="Ulysses"))
+                else:
+                    try:
+                        report = report_path.read_text(encoding="utf-8")
+                        self.console.print(Panel(f"{report}\n\nLoaded report:\n{report_path}", title="Ulysses"))
+                    except OSError as exc:
+                        self.console.print(Panel(f"Report could not be opened: {exc}", title="Ulysses error"))
                 continue
             new_assessment = is_assessment_request(text)
             assessment_request = new_assessment or (

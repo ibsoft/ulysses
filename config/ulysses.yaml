@@ -5,6 +5,8 @@ llm:
   model: gpt-4.1-mini
   base_url: https://api.openai.com/v1
   api_key_env: OPENAI_API_KEY
+  startup_greeting_timeout_seconds: 10
+  network_planning_timeout_seconds: 15
 audio:
   enabled: true
   text_only: false
