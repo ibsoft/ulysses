@@ -36,6 +36,7 @@ class WakeWordConfig(BaseModel):
 class SirinaConfig(BaseModel):
     stt_engine: str = "tdt"
     tts_voice: str = "am_michael"
+    onnx_device: Literal["auto", "cpu", "cuda"] = "auto"
     normalize_tts_text: bool = True
     isolate_tts_process: bool = True
 
@@ -108,6 +109,7 @@ class LoggingConfig(BaseModel):
 
 class TUIConfig(BaseModel):
     theme: Literal["ulysses_dark", "ulysses_light", "terminal"] = "ulysses_dark"
+    name_prompt_completed: bool = False
 
 
 class UpdateConfig(BaseModel):

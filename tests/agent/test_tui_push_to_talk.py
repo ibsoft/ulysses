@@ -175,11 +175,11 @@ async def test_sidebar_shows_release_version_once_below_logo(tmp_path):
         brand = str(app.query_one("#brand", Label).render())
         status = str(app.query_one("#status", Static).render())
 
-        assert brand == "Ulysses v_2.0.15 (update)"
+        assert brand == "ULYSSES v_2.0.15 (update)"
         assert "Version\n" not in status
         assert "Latest branch\n" not in status
         assert status.count("v_2.0.15") == 0
-        assert app.title == "Ulysses v_2.0.15 (update)"
+        assert app.title == "ULYSSES v_2.0.15 (update)"
 
         app.action_status()
         report = app.transcript_plain[-1]
@@ -210,8 +210,8 @@ def test_top_header_includes_locally_installed_version(tmp_path):
 
     app = UlyssesTextualApp(AgentOrchestrator(config, sessions, memory, MockProvider(), SkillRegistry()))
 
-    assert app.title == "Ulysses v_2.0.14"
-    assert app.sub_title == "local-first AI voice agent"
+    assert app.title == "ULYSSES v_2.0.14"
+    assert app.sub_title == "VAPT - PENTEST - VULNERABILITY ASSESSOR"
 
 
 def test_textual_tui_escape_stops_voice_with_priority():

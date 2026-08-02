@@ -14,7 +14,7 @@ src/sirina_agent/
   config/                  YAML plus ULYSSES__... environment overrides
   core/                    orchestration and memory injection
   audio/                   Sirina STT/TTS and wake-word adapters
-  llm/                     OpenAI-compatible providers and OpenAI browser authentication
+  llm/                     OpenAI-compatible providers and OpenAI-Codex authentication
   memory/                  FAISS-backed semantic memory with metadata
   sessions/                SQLite conversation persistence
   security/                command policy, confirmation and audit execution
@@ -275,7 +275,11 @@ Sudo behavior:
 - The Textual TUI opens a sudo password dialog at execution time.
 - The Rich fallback prompts for the sudo password in the terminal.
 - The password is passed directly to `sudo -S` and is not stored in config, logs, SQLite, FAISS, or skill metadata.
-- In godmode, Ulysses does not open the sudo password dialog or ask for typed high-risk confirmation; sudo behaves like any other unrestricted command and the system sudo flow decides what happens.
+- Enabling Godmode through `/godmode on I ACCEPT UNRESTRICTED COMMAND EXECUTION` checks for an encrypted OS credential
+  vault before changing state. Missing GNOME Keyring or SecretStorage prerequisites are reported with proposed install
+  commands. After preflight, Ulysses asks once and stores the password in the encrypted OS vault for trusted sudo
+  execution only.
+- `/godmode off` deletes the cached sudo credential. Normal mode resumes masked sudo prompts for each requested command.
 
 ## Internet Search
 
@@ -423,6 +427,15 @@ sirina download --group all
 cp .env.example .env
 ```
 
+The Linux installer preserves an existing `~/.config/ulysses/ulysses.yaml` by default, including the selected provider.
+Pass `--replace-config` only to intentionally back up that file and restore repository defaults. `--preserve-config`
+remains accepted for compatibility but is now the default behavior.
+
+The Linux installer selects CUDA automatically when `nvidia-smi` reports a usable NVIDIA GPU, verifies that ONNX
+Runtime exposes `CUDAExecutionProvider`, and falls back to CPU inference if verification fails. Set
+`sirina.onnx_device` to `auto`, `cpu`, or `cuda` in the YAML config. The environment variables
+`ULYSSES_ONNX_DEVICE=cpu` and `ULYSSES_ONNX_DEVICE=cuda` provide temporary installer/runtime overrides.
+
 `openwakeword` currently depends on Linux `tflite-runtime` wheels that are not available for every Python version. Install the base agent first, then add wake-word support only on a compatible Python, usually Python 3.11:
 
 ```bash
@@ -431,7 +444,9 @@ python -m pip install -e ".[wakeword]"
 
 Without that extra, Ulysses still runs text-only and Sirina VAD/push-to-talk style voice flows.
 
-Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI API keys, OpenAI browser login through Codex, Kimi / Moonshot, and local Ollama. Kimi defaults to `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key.
+Set `OPENAI_API_KEY` in your shell or `.env` loader, or use `F7` / `/setup providers` inside the TUI. Provider setup supports OpenAI API keys, OpenAI-Codex login, Kimi / Moonshot, and local Ollama. Kimi defaults to model `kimi-k2.7-code` at `https://api.moonshot.ai/v1` with `KIMI_API_KEY`; Ollama defaults to `http://localhost:11434/v1` and does not require a real API key.
+The preferred-name question appears only after the first successful provider setup on a new installation. Completion is
+persisted under `tui.name_prompt_completed`, preventing later provider changes from displaying or speaking it again.
 
 ## Providers
 
@@ -448,10 +463,10 @@ Provider modes:
 - `ollama`: local OpenAI-compatible endpoint; defaults to the placeholder key `ollama` when no key is configured.
 - `mock`: local development response provider, configured through YAML or environment override rather than the setup dialog.
 
-### OpenAI Browser Mode
+### OpenAI-Codex Mode
 
-OpenAI browser login uses the Codex app-server's managed ChatGPT authentication protocol. The Codex CLI must be installed
-and available on `PATH`. Select **OpenAI browser** from `/setup providers`; Ulysses displays the authorization URL in a
+OpenAI-Codex uses the Codex app-server's managed ChatGPT browser-authentication protocol. The Codex CLI must be installed
+and available on `PATH`. Select **OpenAI-Codex** from `/setup providers`; Ulysses displays the authorization URL in a
 selectable field with a **Copy login link** button. Open that link manually, sign in, then paste only the complete localhost
 return URL into the masked callback field.
 
@@ -608,6 +623,7 @@ Sirina's TTS backend uses Kokoro voices. Select a Kokoro voice ID through the `s
 sirina:
   stt_engine: tdt
   tts_voice: am_michael
+  onnx_device: auto
 ```
 
 For the current-user installation, edit `~/.config/ulysses/ulysses.yaml` and restart Ulysses. Available voice IDs are:
@@ -626,6 +642,27 @@ set first:
 sirina download --group all
 sirina check-models --group all
 ```
+
+### ONNX CPU/CUDA Device Selection
+
+`sirina.onnx_device` accepts `auto`, `cpu`, or `cuda`:
+
+- `auto` detects a usable NVIDIA GPU through `nvidia-smi`, installs the CUDA runtime when available, and otherwise uses
+  CPU inference.
+- `cpu` forces `CPUExecutionProvider`.
+- `cuda` requests `CUDAExecutionProvider` with CPU fallback.
+
+During installation, CUDA selection is verified through ONNX Runtime. A failed verification removes the GPU package and
+restores the CPU package. NVIDIA CUDA is currently supported; AMD/ROCm is not automatically configured. Override YAML
+for one invocation with `ULYSSES_ONNX_DEVICE=auto|cpu|cuda`. The environment value takes precedence.
+
+Check the installed runtime with:
+
+```bash
+~/.ulysses/venv/bin/python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+Local Sirina speech models use CUDA when `CUDAExecutionProvider` is present. Hosted LLM providers remain remote.
 
 In the Textual TUI, press `F4`, speak, then pause to transcribe and submit the utterance. Press `F4` again or `Escape`
 to cancel recording. `/talk` provides the same one-shot microphone flow in the Rich fallback. Push-to-talk input is

@@ -22,6 +22,7 @@ wake_word:
 sirina:
   stt_engine: tdt
   tts_voice: am_michael
+  onnx_device: auto
   isolate_tts_process: true
 connectors:
   telegram:
@@ -167,6 +168,7 @@ logging:
   directory: var/ulysses/logs
 tui:
   theme: ulysses_dark
+  name_prompt_completed: false
 updates:
   enabled: true
   check_on_startup: true

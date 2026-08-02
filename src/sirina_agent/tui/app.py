@@ -15,6 +15,7 @@ from sirina_agent.config.security_settings import persist_godmode
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
+    complete_name_onboarding,
     default_for,
     env_path_for_config,
     load_env_file,
@@ -523,12 +524,12 @@ class RichTUI:
         if provider == "openai_chatgpt":
             login = OpenAIBrowserLogin()
             try:
-                with self.console.status("Preparing OpenAI browser login...", spinner="dots"):
+                with self.console.status("Preparing OpenAI-Codex login...", spinner="dots"):
                     login.start()
                 self.console.print("Open this login link in your browser:")
                 self.console.print(login.auth_url, markup=False, soft_wrap=True)
                 callback_url = Prompt.ask("Paste the localhost return URL", password=True)
-                with self.console.status("Completing OpenAI browser login...", spinner="dots"):
+                with self.console.status("Completing OpenAI-Codex login...", spinner="dots"):
                     model = login.complete(callback_url)
                 setup = replace(setup, model=model, base_url="", api_key_env="", api_key="")
             except OpenAIBrowserLoginError as exc:
@@ -553,9 +554,19 @@ class RichTUI:
             f"Provider saved and activated: {self.orchestrator.config.llm.provider} / "
             f"{self.orchestrator.config.llm.model}"
         )
-        question = "Provider setup is complete. How would you like me to address you?"
-        self.console.print(Panel(question, title="Ulysses"))
-        self._speak(question)
+        first_run_name_prompt = (
+            not self.orchestrator.config.tui.name_prompt_completed
+            and self.orchestrator.sessions.message_count(self.orchestrator.session_id) == 0
+        )
+        if not self.orchestrator.config.tui.name_prompt_completed:
+            try:
+                complete_name_onboarding(self.orchestrator.config, config_path)
+            except Exception as exc:
+                self.console.print(Panel(str(exc), title="Could not save onboarding state"))
+        if first_run_name_prompt:
+            question = "Provider setup is complete. How would you like me to address you?"
+            self.console.print(Panel(question, title="Ulysses"))
+            self._speak(question)
 
     def _setup_connectors(self) -> None:
         definitions = connector_definitions()

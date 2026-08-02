@@ -146,6 +146,9 @@ These instructions install Ulysses for the current Linux user from
 [github.com/ibsoft/ulysses](https://github.com/ibsoft/ulysses). The installer creates an isolated Python environment under
 `~/.ulysses`, installs the application, downloads required voice models, and creates the `~/.local/bin/ulysses` launcher.
 It does not require running Ulysses itself as root.
+Existing `~/.config/ulysses/ulysses.yaml` provider and security settings are preserved by default during reinstalls and
+updates. Use `--replace-config` only when you intentionally want to back up and replace the installed configuration with
+repository defaults.
 
 ### 1. Install System Prerequisites
 
@@ -254,7 +257,7 @@ You can also press `F7`. Select one provider:
 
 - **OpenAI API key:** enter the API key in the masked field. Ulysses stores it only in
   `~/.config/ulysses/env` and activates the provider immediately.
-- **OpenAI browser:** requires the Codex CLI. Ulysses displays the real login URL; open it manually, sign in, and paste
+- **OpenAI-Codex:** requires the Codex CLI. Ulysses displays the real login URL; open it manually, sign in, and paste
   the complete localhost return URL into the masked callback field.
 - **Kimi:** enter the Moonshot API key in the masked field.
 - **Ollama:** use a running local Ollama server; no real API key is required.
@@ -378,13 +381,15 @@ Open provider configuration with `F7` or:
 /setup providers
 ```
 
-Select OpenAI API key, OpenAI browser, Kimi, or Ollama. Secret fields are masked and write-only. Submitted API keys are
+Select OpenAI API key, OpenAI-Codex, Kimi, or Ollama. Secret fields are masked and write-only. Submitted API keys are
 saved to `~/.config/ulysses/env` with mode `0600`; YAML stores only the environment-variable name. Leaving a secret blank
 keeps its current value. The selected provider is rebuilt and activated without restarting Ulysses.
+The first successful provider setup on a new installation asks once how Ulysses should address you. Completion is
+persisted, so changing providers later does not display or speak that onboarding question again.
 
-### OpenAI Browser Login
+### OpenAI-Codex Login
 
-Browser login is supported for OpenAI only and requires the Codex CLI. Select **OpenAI browser**, then save:
+Browser login is supported for OpenAI only and requires the Codex CLI. Select **OpenAI-Codex**, then save:
 
 1. Ulysses starts the Codex app-server login protocol and displays the authorization link.
 2. Copy the link, open it in your browser, and sign in to OpenAI.
@@ -497,8 +502,14 @@ cp .env.example .env
 Install CUDA support if needed:
 
 ```bash
-python -m pip install -e ".[cuda]"
+python -m pip uninstall -y onnxruntime
+python -m pip install onnxruntime-gpu
 ```
+
+The Linux installer automatically selects CUDA inference when `nvidia-smi` reports a usable NVIDIA GPU. It verifies
+that ONNX Runtime exposes `CUDAExecutionProvider` and restores the CPU runtime if verification fails. Override automatic
+detection with `sirina.onnx_device: cpu` or `sirina.onnx_device: cuda` in `config/ulysses.yaml`, or temporarily with
+`ULYSSES_ONNX_DEVICE=cpu` or `ULYSSES_ONNX_DEVICE=cuda` when running the installer. The default is `auto`.
 
 Install wake-word support on compatible Python/Linux environments:
 
@@ -516,6 +527,37 @@ Sirina needs local model files for real STT/TTS:
 sirina download --group all
 sirina check-models --group all
 ```
+
+### CPU And NVIDIA GPU Inference
+
+Configure the ONNX inference device under `sirina` in `~/.config/ulysses/ulysses.yaml` (installed application) or
+`config/ulysses.yaml` (development checkout):
+
+```yaml
+sirina:
+  onnx_device: auto
+```
+
+Valid values are:
+
+- `auto` (default): the installer selects CUDA when `nvidia-smi` reports a usable NVIDIA GPU; otherwise it installs and
+  uses the CPU runtime.
+- `cpu`: force `CPUExecutionProvider`, even when CUDA is installed.
+- `cuda`: install/request `CUDAExecutionProvider`, retaining CPU as the runtime fallback.
+
+The installer verifies that the GPU runtime exposes `CUDAExecutionProvider`. If verification fails, it removes the GPU
+runtime and restores CPU ONNX Runtime so installation can complete safely. GPU acceleration currently targets NVIDIA
+CUDA; AMD/ROCm acceleration is not automatically configured.
+
+For a one-run override, set `ULYSSES_ONNX_DEVICE=auto`, `ULYSSES_ONNX_DEVICE=cpu`, or
+`ULYSSES_ONNX_DEVICE=cuda`. The environment value takes precedence over YAML. Verify the active providers with:
+
+```bash
+~/.ulysses/venv/bin/python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+`CUDAExecutionProvider` in that output confirms that local Sirina STT/TTS can use the NVIDIA GPU. Remote LLM providers
+such as OpenAI do not use the local GPU.
 
 ### Available Kokoro TTS Voices
 
@@ -570,8 +612,8 @@ ULYSSES__LLM__PROVIDER=mock ulysses --config config/ulysses.yaml --text-only
 Provider setup is available inside the TUI with `F7` or `/setup providers`. It can save and activate:
 
 - OpenAI API key: `https://api.openai.com/v1`, key env `OPENAI_API_KEY`
-- OpenAI browser: Codex-managed ChatGPT login; model is discovered from authenticated `model/list`
-- Kimi / Moonshot: `https://api.moonshot.ai/v1`, key env `KIMI_API_KEY`
+- OpenAI-Codex: Codex-managed ChatGPT login; model is discovered from authenticated `model/list`
+- Kimi / Moonshot: `https://api.moonshot.ai/v1`, default model `kimi-k2.7-code`, key env `KIMI_API_KEY`
 - Local Ollama: `http://localhost:11434/v1`, no real API key required
 
 In the composer, `Ctrl+V` reads the system clipboard through `xclip`/`xsel` on X11 or `wl-clipboard` on Wayland.
@@ -590,7 +632,7 @@ Important sections:
 - `llm`: provider, model, base URL, and API key environment variable.
 - `audio`: microphone/speaker device selection and VAD timing.
 - `wake_word`: wake-word behavior and thresholds.
-- `sirina`: STT engine and TTS voice.
+- `sirina`: STT engine, TTS voice, and ONNX device selection (`auto`, `cpu`, or `cuda`).
 - `memory`: SQLite, FAISS, metadata paths, and retrieval settings.
 - `context`: automatic session consolidation.
 - `skills`: internet search and local command policy.
@@ -608,7 +650,11 @@ Environment overrides use the `ULYSSES__` prefix. Example:
 ```bash
 ULYSSES__LLM__PROVIDER=mock
 ULYSSES__AUDIO__ENABLED=false
+ULYSSES__SIRINA__ONNX_DEVICE=cpu
 ```
+
+`ULYSSES_ONNX_DEVICE=cpu|cuda|auto` is also supported as the concise installer/runtime override for ONNX device
+selection.
 
 ## Authorized Assessment Workflow
 
@@ -741,7 +787,13 @@ Ulysses treats local command execution as a privileged capability.
 - MCP is disabled by default; each server and tool must be enabled explicitly, and remote HTTP endpoints require TLS except on loopback.
 - MCP metadata and results are untrusted input. Server tool catalogs and returned output are capped before entering model context.
 
-Godmode is off by default. Setting `skills.command.godmode: true` gives full local command access: it bypasses the allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through `bash -lc`. It still uses the configured working directory, environment filtering, timeouts, output caps, and audit logging. Do not enable god mode unless you accept uncontrolled system access, including during autonomous operation.
+Godmode is off by default. Use `/godmode on I ACCEPT UNRESTRICTED COMMAND EXECUTION` to enable it. Ulysses first checks
+for an encrypted OS credential vault and proposes the required GNOME Keyring/SecretStorage installation when unavailable.
+After successful preflight it asks for the sudo password once and stores it in the encrypted OS vault for trusted sudo
+execution only. `/godmode off` disables unrestricted execution and deletes the cached credential. Godmode bypasses the
+allowlist, denylist, normal confirmation, high-risk typed confirmation, and permits shell control operators through
+`bash -lc`; working-directory, environment, timeout, output-cap, and audit controls remain active. Do not enable it unless
+you accept uncontrolled local command execution, including during autonomous operation.
 
 ## Privacy And Data
 

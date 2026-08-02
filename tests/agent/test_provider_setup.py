@@ -7,8 +7,10 @@ from sirina_agent.config.models import LLMConfig, UlyssesConfig
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
+    complete_name_onboarding,
     env_path_for_config,
     load_env_file,
+    provider_labels,
     setup_from_provider,
 )
 from sirina_agent.llm.providers import (
@@ -18,6 +20,26 @@ from sirina_agent.llm.providers import (
     UnconfiguredProvider,
     build_provider,
 )
+
+
+def test_provider_setup_uses_openai_codex_label():
+    assert ("openai_chatgpt", "OpenAI-Codex") in provider_labels()
+
+
+def test_kimi_provider_uses_kimi_k27_code_by_default():
+    assert setup_from_provider("kimi").model == "kimi-k2.7-code"
+
+
+def test_name_prompt_completion_is_persisted(tmp_path):
+    config_path = tmp_path / "ulysses.yaml"
+    config_path.write_text("tui:\n  theme: ulysses_dark\n", encoding="utf-8")
+    config = load_config(config_path)
+
+    assert not config.tui.name_prompt_completed
+    complete_name_onboarding(config, config_path)
+
+    assert config.tui.name_prompt_completed
+    assert load_config(config_path).tui.name_prompt_completed
 
 
 def test_kimi_provider_setup_writes_yaml_and_env(tmp_path):

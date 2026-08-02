@@ -63,7 +63,7 @@ def _llm_status(cfg) -> tuple[bool, str]:
         return False, f"needs setup ({llm.api_key_env} missing)"
     if llm.provider == "openai_chatgpt":
         if not codex_chatgpt_authenticated():
-            return False, "needs setup (OpenAI browser login)"
+            return False, "needs setup (OpenAI-Codex login)"
         return True, f"authenticated (openai / {llm.model})"
     return False, "needs provider setup"
 

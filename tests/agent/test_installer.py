@@ -29,10 +29,12 @@ def test_sync_excludes_development_state_and_recovers_interrupted_backups():
     assert 'cp -a "${PROJECT_ROOT}/." "${APP_SOURCE}/"' not in script
 
 
-def test_upgrade_refreshes_config_with_backup_by_default():
+def test_upgrade_preserves_config_by_default_and_requires_explicit_replacement():
     script = INSTALLER.read_text(encoding="utf-8")
 
+    assert "PRESERVE_CONFIG=true" in script
     assert "--preserve-config" in script
+    assert "--replace-config" in script
     assert 'ulysses.yaml.backup-$(date +%Y%m%d-%H%M%S)' in script
     assert 'cp -p "${CONFIG_HOME}/ulysses.yaml" "${CONFIG_BACKUP}"' in script
     assert 'cp "${APP_SOURCE}/config/ulysses.yaml" "${CONFIG_HOME}/ulysses.yaml"' in script
