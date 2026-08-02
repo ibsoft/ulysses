@@ -11,6 +11,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from sirina_agent.config import load_config
+from sirina_agent.config.security_settings import persist_godmode
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -349,6 +350,40 @@ class RichTUI:
         elif cmd in {"/status", "/config"}:
             self.console.print_json(data=self.orchestrator.config.model_dump_safe())
             self.console.print(f"Update: {self.updates.status.summary()}")
+        elif cmd == "/godmode":
+            current = self.orchestrator.config.skills.command.godmode
+            if len(parts) == 1 or parts[1].lower() == "status":
+                self.console.print(f"Godmode: {'on' if current else 'off'}")
+            elif parts[1].lower() == "off":
+                credential_error = None
+                try:
+                    self.orchestrator.clear_godmode_sudo_password()
+                except Exception as exc:
+                    credential_error = str(exc)
+                persist_godmode(self.orchestrator.config_path, False)
+                self.orchestrator.config.skills.command.godmode = False
+                self.orchestrator.sync_command_policy_from_config(force=True)
+                self.console.print("Godmode: off (saved and active)")
+                if credential_error:
+                    self.console.print(f"Credential-vault cleanup could not be verified: {credential_error}")
+            elif (
+                parts[1].lower() == "on"
+                and " ".join(parts[2:]) == "I ACCEPT UNRESTRICTED COMMAND EXECUTION"
+            ):
+                ready, guidance = self.orchestrator.godmode_credential_readiness()
+                if not ready:
+                    self.console.print(Panel(guidance, title="Godmode was not enabled"))
+                    return False
+                persist_godmode(self.orchestrator.config_path, True)
+                self.orchestrator.config.skills.command.godmode = True
+                self.orchestrator.sync_command_policy_from_config(force=True)
+                password = Prompt.ask("sudo password (stored in the encrypted OS credential vault)", password=True)
+                self.orchestrator.store_godmode_sudo_password(password)
+                self.console.print("Godmode: on (saved and active)")
+            else:
+                self.console.print(
+                    "Usage: /godmode, /godmode off, or /godmode on I ACCEPT UNRESTRICTED COMMAND EXECUTION"
+                )
         elif cmd == "/update":
             if len(parts) > 1 and parts[1].lower() == "install":
                 with self.console.status("[bold cyan]Installing update from GitHub main...[/bold cyan]", spinner="dots"):

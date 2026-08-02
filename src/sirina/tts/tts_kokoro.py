@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ configure_onnxruntime_logging()
 
 
 VOICES_PATH = TTS_KOKORO_VOICES_PATH
+SENTENCE_PAUSE_SECONDS = 0.12
 
 
 def get_voices(path: Path | None = None) -> list[str]:
@@ -104,10 +106,50 @@ class SpeechSynthesizer:
         Returns:
             NDArray[np.float32]: An array of audio samples representing the synthesized speech
         """
-        phonemes = self.phonemizer.convert_to_phonemes([text], "en_us")
-        phoneme_ids = self._phonemes_to_ids(phonemes[0])
-        audio = self._synthesize_ids_to_audio(phoneme_ids)
-        return np.array(audio, dtype=np.float32)
+        chunks = self._phoneme_chunks(text)
+        audio_chunks = [self._synthesize_ids_to_audio(self._phonemes_to_ids(chunk)) for chunk in chunks]
+        if not audio_chunks:
+            return np.array([], dtype=np.float32)
+        if len(audio_chunks) == 1:
+            return np.asarray(audio_chunks[0], dtype=np.float32)
+
+        pause = np.zeros(round(self.sample_rate * SENTENCE_PAUSE_SECONDS), dtype=np.float32)
+        joined: list[NDArray[np.float32]] = []
+        for index, audio in enumerate(audio_chunks):
+            if index:
+                joined.append(pause)
+            joined.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+        return np.concatenate(joined).astype(np.float32, copy=False)
+
+    def _phoneme_chunks(self, text: str) -> list[str]:
+        """Phonemize sentences separately so Kokoro cannot stop after the first one."""
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+        chunks: list[str] = []
+        for sentence in sentences:
+            phonemes = self.phonemizer.convert_to_phonemes([sentence], "en_us")[0]
+            if len(phonemes) <= self.MAX_PHONEME_LENGTH:
+                chunks.append(phonemes)
+                continue
+            chunks.extend(self._split_long_sentence(sentence))
+        return chunks
+
+    def _split_long_sentence(self, sentence: str) -> list[str]:
+        """Split an unusually long sentence at word boundaries within the model limit."""
+        chunks: list[str] = []
+        words: list[str] = []
+        for word in sentence.split():
+            candidate = " ".join([*words, word])
+            phonemes = self.phonemizer.convert_to_phonemes([candidate], "en_us")[0]
+            if len(phonemes) <= self.MAX_PHONEME_LENGTH:
+                words.append(word)
+                continue
+            if not words:
+                raise ValueError(f"text is too long, must be less than {self.MAX_PHONEME_LENGTH} phonemes")
+            chunks.append(self.phonemizer.convert_to_phonemes([" ".join(words)], "en_us")[0])
+            words = [word]
+        if words:
+            chunks.append(self.phonemizer.convert_to_phonemes([" ".join(words)], "en_us")[0])
+        return chunks
 
     @staticmethod
     def _get_vocab() -> dict[str, int]:

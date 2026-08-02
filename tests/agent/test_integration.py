@@ -101,30 +101,20 @@ class RecordingProvider:
 
 
 class SecurityVoiceSummaryProvider:
+    def __init__(self):
+        self.calls = 0
+
     def complete(self, messages, tools=None):
-        assert "senior defensive security engineer" in messages[0]["content"]
-        assert "Chain INPUT" in messages[1]["content"]
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": (
-                            "The host firewall accepts inbound and forwarded traffic by default, with no filtering "
-                            "rules visible. This leaves network exposure controlled by listening services rather than "
-                            "host policy; define a default-deny baseline after confirming required access."
-                        ),
-                    }
-                }
-            ]
-        }
+        self.calls += 1
+        raise AssertionError("voice summarization must not call the LLM")
 
 
-def test_long_firewall_output_gets_meaningful_security_voice_summary(tmp_path):
+def test_long_voice_summary_is_derived_only_from_current_response(tmp_path):
     cfg = UlyssesConfig()
     sessions = SessionStore(tmp_path / "s.sqlite3")
     memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
-    agent = AgentOrchestrator(cfg, sessions, memory, SecurityVoiceSummaryProvider(), SkillRegistry())
+    provider = SecurityVoiceSummaryProvider()
+    agent = AgentOrchestrator(cfg, sessions, memory, provider, SkillRegistry())
     firewall_output = (
         "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)\n"
         "pkts bytes target prot opt in out source destination\n" * 8
@@ -132,9 +122,9 @@ def test_long_firewall_output_gets_meaningful_security_voice_summary(tmp_path):
 
     summary = agent.summarize_for_voice(firewall_output)
 
-    assert "accepts inbound and forwarded traffic" in summary
-    assert "packets" not in summary
-    assert "bytes" not in summary
+    assert summary.startswith("Summary:")
+    assert "accepts inbound and forwarded traffic" not in summary
+    assert provider.calls == 0
 
 
 class NarrateThenCommandProvider:
@@ -524,6 +514,63 @@ def test_trusted_sudo_password_reaches_only_command_runner(tmp_path):
     assert result == "ok"
     assert received == {"argv": ["sudo", "id"], "password": "modal-secret"}
     assert "modal-secret" not in repr(sessions.messages(agent.session_id))
+
+
+def test_godmode_reuses_cached_sudo_password_without_prompting(tmp_path):
+    cfg = UlyssesConfig()
+    cfg.skills.command.godmode = True
+    sessions = SessionStore(tmp_path / "s.sqlite3")
+    memory = FaissMemoryStore(tmp_path / "m.faiss", tmp_path / "m.jsonl", LocalHashEmbeddingProvider(64))
+    policy = CommandPolicy(["id"], [], tmp_path, ["PATH"], godmode=True)
+    runner = CommandRunner(policy, logging.getLogger("test"), 2, 1000)
+    received = {}
+
+    def fake_run(argv, sudo_password=None):
+        received["password"] = sudo_password
+        return {"returncode": 0, "stdout": "ok", "stderr": ""}
+
+    runner.run = fake_run
+    registry = SkillRegistry()
+    registry.register(SystemCommandSkill(runner))
+    agent = AgentOrchestrator(cfg, sessions, memory, MockProvider(), registry)
+
+    class CachedCredential:
+        def get(self):
+            return "vault-secret"
+
+        def set(self, password):
+            raise AssertionError("existing credential should be reused")
+
+        def clear(self):
+            pass
+
+    agent.sudo_credentials = CachedCredential()
+
+    result = agent._run_skill_result("system_command", {"command": "sudo id"})
+
+    assert result.ok
+    assert not result.requires_confirmation
+    assert received == {"password": "vault-secret"}
+    assert "vault-secret" not in repr(result)
+
+
+def test_godmode_off_hides_and_deletes_cached_sudo_password(tmp_path):
+    agent = AgentOrchestrator.__new__(AgentOrchestrator)
+    agent.config = UlyssesConfig()
+    cleared = []
+
+    class CachedCredential:
+        def get(self):
+            return "vault-secret"
+
+        def clear(self):
+            cleared.append(True)
+
+    agent.sudo_credentials = CachedCredential()
+
+    assert agent.cached_godmode_sudo_password() is None
+    agent.clear_godmode_sudo_password()
+    assert cleared == [True]
 
 
 def test_orchestrator_completes_answer_after_tool_call(tmp_path):

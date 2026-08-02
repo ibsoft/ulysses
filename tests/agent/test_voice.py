@@ -22,20 +22,62 @@ def test_summarize_for_speech_keeps_short_text():
     assert summarize_for_speech("Short status update.") == "Short status update."
 
 
+def test_summarize_for_speech_keeps_a_small_multi_sentence_response() -> None:
+    text = (
+        "Based on our interaction, you approach Kali Linux security tasks methodically and securely, providing clear "
+        "authorization for actions, preferring direct and concise assistance, and valuing control over privileged "
+        "operations. You emphasize explicit confirmations before elevated commands, indicating strong security "
+        "awareness and operational discipline."
+    )
+
+    assert summarize_for_speech(text) == text
+
+
+def test_summarize_for_speech_never_reads_code_or_switch_heavy_commands() -> None:
+    text = """Review complete.
+
+```bash
+python3 scan.py --target example.com --format json
+```
+
+Run `dangerous_call()` only after approval.
+curl --silent --show-error https://example.com
+The transcript contains the full technical details.
+"""
+
+    spoken = summarize_for_speech(text)
+
+    assert spoken == "Review complete. Run only after approval. The transcript contains the full technical details."
+    assert "scan.py" not in spoken
+    assert "dangerous_call" not in spoken
+    assert "curl" not in spoken
+
+
+def test_summarize_for_speech_uses_safe_notice_when_response_is_only_code() -> None:
+    assert summarize_for_speech("```python\nprint('secret')\n```") == "Code or command omitted. See the transcript."
+
+
+def test_summarize_for_speech_always_summarizes_large_text() -> None:
+    text = " ".join(["Detailed operational result."] * 40)
+
+    spoken = summarize_for_speech(text)
+
+    assert spoken.startswith("Summary:")
+    assert len(spoken) <= 320
+
+
 def test_summarize_for_speech_shortens_long_bullets():
     text = "\n".join(
         [
-            "- Are all subdomains included, or just the main domain?",
-            "- Do you want just a network port scan, or also web application security testing?",
-            "- Confirm that you have authorization to conduct active scanning and penetration testing.",
-            "- Any particular focus areas or critical assets?",
+            f"- Are all subdomains included in assessment area {index}, or just the main domain?"
+            for index in range(1, 10)
         ]
     )
 
     summary = summarize_for_speech(text)
 
     assert summary.startswith("Summary: Are all subdomains included")
-    assert "Any particular focus areas" not in summary
+    assert "assessment area 4" not in summary
     assert len(summary) <= 320
 
 

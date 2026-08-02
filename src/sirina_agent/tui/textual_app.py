@@ -23,6 +23,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Label, RichLog, Select, Static
 
 from sirina_agent.config import load_config
+from sirina_agent.config.security_settings import persist_godmode
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
@@ -131,10 +132,14 @@ class SudoPasswordScreen(ModalScreen[str | None]):
     }
     """
 
+    def __init__(self, message: str = "Enter your sudo password to run the confirmed command. It will not be stored.") -> None:
+        super().__init__()
+        self.message = message
+
     def compose(self) -> ComposeResult:
         with Vertical(id="sudo-dialog"):
             yield Label("Sudo permission required")
-            yield Static("Enter your sudo password to run the confirmed command. It will not be stored.")
+            yield Static(self.message)
             yield Input(password=True, placeholder="sudo password", id="sudo-password")
             with Horizontal(id="sudo-actions"):
                 yield Button("Run", variant="error", id="run")
@@ -1342,6 +1347,8 @@ class UlyssesTextualApp(App):
             self._autonomous_command(parts)
         elif cmd in {"/status", "/config"}:
             self.action_status()
+        elif cmd == "/godmode":
+            self._godmode_command(parts)
         elif cmd == "/reload":
             self.action_reload_config()
         elif cmd == "/update":
@@ -1406,6 +1413,58 @@ class UlyssesTextualApp(App):
         else:
             self._write_error("Unknown command.")
         self._refresh_status()
+
+    def _godmode_command(self, parts: list[str]) -> None:
+        current = self.orchestrator.config.skills.command.godmode
+        if len(parts) == 1 or parts[1].lower() == "status":
+            self._write_system(f"Godmode: {'on' if current else 'off'}")
+            return
+        requested = parts[1].lower()
+        if requested not in {"on", "off"}:
+            self._write_system("Usage: /godmode, /godmode off, or /godmode on I ACCEPT UNRESTRICTED COMMAND EXECUTION")
+            return
+        if requested == "on" and " ".join(parts[2:]) != "I ACCEPT UNRESTRICTED COMMAND EXECUTION":
+            self._write_error("Enabling Godmode requires: /godmode on I ACCEPT UNRESTRICTED COMMAND EXECUTION")
+            return
+        enabled = requested == "on"
+        if enabled:
+            ready, guidance = self.orchestrator.godmode_credential_readiness()
+            if not ready:
+                self._write_error(f"Godmode was not enabled.\n{guidance}")
+                return
+        credential_error: str | None = None
+        if not enabled:
+            try:
+                self.orchestrator.clear_godmode_sudo_password()
+            except Exception as exc:
+                credential_error = str(exc)
+        try:
+            persist_godmode(self.orchestrator.config_path, enabled)
+            self.orchestrator.config.skills.command.godmode = enabled
+            if not self.orchestrator.sync_command_policy_from_config(force=True):
+                raise RuntimeError("command policy synchronization failed")
+        except Exception as exc:
+            self._write_error(f"Godmode update failed: {exc}")
+            return
+        self._write_system(f"Godmode: {'on' if enabled else 'off'} (saved and active)")
+        if credential_error:
+            self._write_error(f"Godmode is off, but credential-vault cleanup could not be verified: {credential_error}")
+        if enabled:
+            self.push_screen(
+                SudoPasswordScreen("Enter your sudo password once. It will be encrypted in the OS credential vault."),
+                self._store_godmode_sudo_password,
+            )
+
+    def _store_godmode_sudo_password(self, password: str | None) -> None:
+        if password is None:
+            self._write_system("Godmode is on, but no sudo password was cached.")
+            return
+        try:
+            self.orchestrator.store_godmode_sudo_password(password)
+        except Exception as exc:
+            self._write_error(f"Secure sudo credential storage failed: {exc}")
+            return
+        self._write_system("Sudo password stored in the encrypted OS credential vault.")
 
     def _mcp_command(self, parts: list[str]) -> None:
         manager = self.orchestrator.mcp
@@ -2320,6 +2379,8 @@ class UlyssesTextualApp(App):
     def _speak_in_thread(self, text: str, speech_id: int) -> None:
         try:
             spoken_text = self.orchestrator.summarize_for_voice(text)
+            if speech_id != self._speech_id:
+                return
             self.voice_io.speak(
                 spoken_text,
                 on_playback_start=lambda: self.call_from_thread(self._start_speaking_ui, speech_id),

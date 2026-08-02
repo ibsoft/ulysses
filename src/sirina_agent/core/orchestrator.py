@@ -9,12 +9,12 @@ from typing import Callable
 
 from .defense import AutonomousDefenseEngine, DefenseCheck
 from ..security.commands import CommandPolicy
+from ..security.sudo_credentials import SudoCredentialStore
 from ..skills.base import SkillResult
 from ..skills.builder import SkillBuildError, build_skill_spec
 
 
 MEMORY_SAVE_TIMEOUT_SECONDS = 2.0
-VOICE_SEMANTIC_SUMMARY_AFTER_CHARS = 320
 
 
 class AgentOrchestrator:
@@ -31,6 +31,7 @@ class AgentOrchestrator:
     ) -> None:
         self.config = config
         self.config_path = Path(config_path).expanduser() if config_path else Path("config/ulysses.yaml")
+        self.sudo_credentials = SudoCredentialStore(self.config_path)
         self.sessions = sessions
         self.memory = memory
         self.llm = llm
@@ -316,6 +317,8 @@ class AgentOrchestrator:
     def _system_prompt(self) -> str:
         prompt_parts = [
             f"You are {self.config.agent_name} v{self.config.agent_version}.",
+            f"Live runtime fact: Godmode is {'on' if self.config.skills.command.godmode else 'off'}.",
+            "Never infer configuration state from chat history; use the live runtime facts in this prompt.",
             f"Personality: {self.config.prompt.personality}",
             self.config.prompt.instructions,
         ]
@@ -581,6 +584,13 @@ class AgentOrchestrator:
             arguments.pop("sudo_password", None)
         if name == "system_command":
             self.sync_command_policy_from_config(force=False)
+            command = str(arguments.get("command", ""))
+            if self.config.skills.command.godmode and re.search(r"\bsudo\b", command):
+                cached_password = self.cached_godmode_sudo_password()
+                if cached_password:
+                    arguments = dict(arguments)
+                    arguments["sudo_password"] = cached_password
+                    trusted_sudo_password = True
         previous_skill = self.active_skill
         self.active_skill = name
         self._activity(f"using skill {name}")
@@ -588,7 +598,9 @@ class AgentOrchestrator:
             try:
                 skill = self.skills.get(name)
             except KeyError:
-                return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": arguments})
+                safe_arguments = dict(arguments)
+                safe_arguments.pop("sudo_password", None)
+                return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": safe_arguments})
             activity_label = skill.manifest.activity_label
             if name == "system_command" and re.search(r"\b(?:install|installation)\b", str(arguments.get("command", "")), re.I):
                 activity_label = "installing"
@@ -695,6 +707,11 @@ class AgentOrchestrator:
         if sudo_password:
             result.content = result.content.replace(sudo_password, "<redacted>")
             result.data = self._redact_value(result.data, sudo_password)
+            if self.config.skills.command.godmode and result.ok:
+                try:
+                    self.store_godmode_sudo_password(sudo_password)
+                except Exception:
+                    pass
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content
@@ -726,6 +743,25 @@ class AgentOrchestrator:
         if isinstance(value, str):
             return value.replace(secret, "<redacted>")
         return value
+
+    def cached_godmode_sudo_password(self) -> str | None:
+        if not self.config.skills.command.godmode:
+            return None
+        try:
+            return self.sudo_credentials.get()
+        except Exception:
+            return None
+
+    def godmode_credential_readiness(self) -> tuple[bool, str]:
+        return self.sudo_credentials.readiness()
+
+    def store_godmode_sudo_password(self, password: str) -> None:
+        if not self.config.skills.command.godmode:
+            raise RuntimeError("Godmode is off; sudo credentials cannot be cached")
+        self.sudo_credentials.set(password)
+
+    def clear_godmode_sudo_password(self) -> None:
+        self.sudo_credentials.clear()
 
     @staticmethod
     def _command_completion_message(result: SkillResult) -> str:
@@ -817,35 +853,11 @@ class AgentOrchestrator:
         return content
 
     def summarize_for_voice(self, text: str) -> str:
-        structured_packet_output = bool(
-            re.search(r"(?im)^\s*(?:chain\s+\S+\s+\(policy|pkts\s+bytes\s+target)", text)
-        )
-        if len(text.strip()) <= VOICE_SEMANTIC_SUMMARY_AFTER_CHARS and not structured_packet_output:
-            return text
-        self._activity("summarizing for speech")
-        try:
-            response = self.llm.complete(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are the spoken voice of a senior defensive security engineer. Summarize the supplied "
-                            "content in at most three short, natural sentences suitable for speech. State the security "
-                            "meaning, material exposure or risk, and the most useful next action when supported. Do not "
-                            "read tables, columns, packet or byte counters, rule-table headers, identifiers, raw logs, "
-                            "or command output line by line. Do not quote packet-level data. Do not invent "
-                            "facts, vulnerabilities, severity, or remediation unsupported by the content. Return only "
-                            "the spoken summary, without Markdown or a preamble."
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
-                tools=None,
-            )
-            summary = (response["choices"][0]["message"].get("content") or "").strip()
-            return summary or text
-        except Exception:
-            return text
+        # Derive speech only from the answer currently displayed. A second LLM
+        # call can leak unrelated conversational context into the spoken output.
+        from sirina_agent.audio.sirina_io import summarize_for_speech
+
+        return summarize_for_speech(text)
 
     def startup_greeting(self) -> str:
         metadata = self.sessions.session_metadata(self.session_id)

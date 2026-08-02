@@ -8,6 +8,7 @@ from sirina import SpeechToText, TextToSpeech
 from sirina.audio_io.devices import format_audio_devices, resolve_audio_device
 from sirina.resources import resource_path
 from sirina.stt.audio_file import resample_audio
+from sirina.tts.tts_kokoro import SENTENCE_PAUSE_SECONDS, SpeechSynthesizer
 
 
 class FakeSynthesizer:
@@ -35,6 +36,36 @@ def test_text_to_speech_wrapper_uses_injected_synthesizer() -> None:
 
     assert audio.dtype == np.float32
     assert tts.sample_rate == 16000
+
+
+def test_kokoro_synthesizes_every_sentence_and_joins_the_audio() -> None:
+    class FakePhonemizer:
+        def convert_to_phonemes(self, texts, lang):
+            assert lang == "en_us"
+            return [f"phonemes:{text}" for text in texts]
+
+    synthesizer = SpeechSynthesizer.__new__(SpeechSynthesizer)
+    synthesizer.sample_rate = 100
+    synthesizer.phonemizer = FakePhonemizer()
+    synthesized = []
+
+    def fake_synthesize(ids):
+        synthesized.append(ids)
+        return np.ones(2, dtype=np.float32) * len(synthesized)
+
+    synthesizer._phonemes_to_ids = lambda phonemes: [len(phonemes)]
+    synthesizer._synthesize_ids_to_audio = fake_synthesize
+
+    audio = synthesizer.generate_speech_audio("First sentence ends here. Second sentence must also be spoken.")
+
+    assert synthesized == [
+        [len("phonemes:First sentence ends here.")],
+        [len("phonemes:Second sentence must also be spoken.")],
+    ]
+    pause_samples = round(synthesizer.sample_rate * SENTENCE_PAUSE_SECONDS)
+    np.testing.assert_array_equal(audio[:2], np.ones(2, dtype=np.float32))
+    np.testing.assert_array_equal(audio[2 : 2 + pause_samples], np.zeros(pause_samples, dtype=np.float32))
+    np.testing.assert_array_equal(audio[-2:], np.ones(2, dtype=np.float32) * 2)
 
 
 def test_speech_to_text_wrapper_uses_injected_transcriber() -> None:
