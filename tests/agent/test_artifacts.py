@@ -46,7 +46,7 @@ def test_resolve_report_lists_ambiguous_reports_and_selects_number(tmp_path):
 
     assert selected is None
     assert "Several reports are available" in guidance
-    assert numbered == first.path
+    assert numbered == manager.list_downloads()[1]
     assert second.path in manager.list_downloads()
 
 

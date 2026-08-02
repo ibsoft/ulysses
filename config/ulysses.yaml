@@ -26,6 +26,14 @@ sirina:
   tts_voice: am_michael
   onnx_device: auto
   isolate_tts_process: true
+  voice_summary_enabled: true
+  voice_summary_model: Falconsai/text_summarization
+  voice_summary_model_path: models/voice-summary
+  voice_summary_after_chars: 600
+  voice_summary_max_chars: 420
+  voice_summary_max_input_tokens: 480
+  voice_summary_max_chunks: 6
+  voice_summary_max_output_tokens: 96
 connectors:
   telegram:
     enabled: false
@@ -166,6 +174,35 @@ skills:
       - ip
       - journalctl
       - which
+      - date
+      - cal
+      - hostname
+      - hostnamectl
+      - id
+      - groups
+      - free
+      - vmstat
+      - lscpu
+      - lspci
+      - lsusb
+      - stat
+      - file
+      - du
+      - head
+      - tail
+      - wc
+      - sort
+      - uniq
+      - cut
+      - grep
+      - awk
+      - echo
+      - printf
+      - readlink
+      - realpath
+      - ping
+      - traceroute
+      - tracepath
     denied_commands: [rm, sudo, su, chmod, chown, mkfs, mount, umount]
 logging:
   directory: var/ulysses/logs

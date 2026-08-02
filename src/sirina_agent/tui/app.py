@@ -4,7 +4,7 @@ import json
 import os
 import re
 from dataclasses import replace
-from threading import Thread
+from threading import Event, Thread
 
 from rich.console import Console
 from rich.panel import Panel
@@ -46,6 +46,7 @@ from sirina_agent.core.assessment import (
     missing_tool_packages,
     render_assessment_report,
 )
+from sirina_agent.core.tasks import TaskStore, format_tasks, parse_recurring_prompt
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
 from sirina_agent.llm.providers import build_provider
 from sirina_agent.mcp.client import SDKMCPClient
@@ -70,7 +71,10 @@ class RichTUI:
         self.voice_io = voice_io
         self.console = Console()
         self.artifacts = ArtifactManager.from_config(orchestrator.config)
+        self.tasks = TaskStore(self.artifacts.runtime_dir / "tasks.json")
+        self._task_stop = Event()
         self._last_user_text = ""
+        self.last_assistant_text = ""
         self._last_response_wants_report = False
         self._assessment_project: AssessmentProject | None = None
         self._assessment_install_attempted = False
@@ -83,6 +87,7 @@ class RichTUI:
         self.updates = UpdateManager(orchestrator.config.updates)
 
     def run(self) -> None:
+        Thread(target=self._task_loop, daemon=True).start()
         boot_message = startup_brief(self.orchestrator, self.voice_io)
         self.console.print(Panel(f"{ULYSSES_LOGO}\n{boot_message}"))
         if not bool(getattr(self.orchestrator.llm, "configured", True)):
@@ -118,6 +123,28 @@ class RichTUI:
             if text.startswith("/"):
                 if self._command(text):
                     break
+                continue
+            if re.fullmatch(
+                r"(?:please\s+)?summari[sz]e\s+(?:the\s+)?(?:last|previous)\s+(?:response|answer|message)",
+                text.strip(),
+                re.IGNORECASE,
+            ):
+                if not self.last_assistant_text:
+                    self.console.print(Panel("No previous assistant response is available.", title="Ulysses"))
+                else:
+                    with self.console.status("Summarizing previous response locally...", spinner="dots"):
+                        summary = self.orchestrator.summarize_for_voice(self.last_assistant_text, force=True)
+                    self.last_assistant_text = summary
+                    self.console.print(Panel(summary, title="Ulysses"))
+                    self._speak(summary)
+                continue
+            recurring = parse_recurring_prompt(text)
+            if recurring:
+                try:
+                    task = self.tasks.add(*recurring)
+                    self.console.print(f"Recurring task created: {task.id}; next run: {task.next_run_at}")
+                except ValueError as exc:
+                    self.console.print(Panel(str(exc), title="Task error"))
                 continue
             if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", text, re.I):
                 report_path, guidance = self.artifacts.resolve_report(text, self._assessment_project)
@@ -187,10 +214,12 @@ class RichTUI:
                 self._last_response_wants_report = False
                 if save_final_assessment:
                     self._set_project_result_capture(self._assessment_project)
+            self.last_assistant_text = answer
             self.console.print(Panel(answer, title="Ulysses"))
             if should_speak:
                 self._speak(answer)
         self.connectors.stop_all()
+        self._task_stop.set()
         if self.orchestrator.mcp:
             self.orchestrator.mcp.stop()
 
@@ -364,6 +393,8 @@ class RichTUI:
                     self._speak(note)
             else:
                 self.console.print(f"Autonomous mode: {'on' if self.orchestrator.autonomous_enabled() else 'off'}")
+        elif cmd in {"/task", "/tasks"}:
+            self._task_command(text, parts)
         elif cmd in {"/status", "/config"}:
             self.console.print_json(data=self.orchestrator.config.model_dump_safe())
             self.console.print(f"Update: {self.updates.status.summary()}")
@@ -515,6 +546,51 @@ class RichTUI:
         else:
             self.console.print("Unknown command.")
         return False
+
+    def _task_command(self, text: str, parts: list[str]) -> None:
+        action = parts[1].lower() if len(parts) > 1 and parts[0] == "/task" else "list"
+        if action in {"list", "status"}:
+            self.console.print(format_tasks(self.tasks.list()))
+        elif action == "add":
+            specification = text.split("add", 1)[1].strip()
+            if "::" not in specification:
+                self.console.print("Usage: /task add <schedule> :: <prompt>")
+                return
+            schedule, prompt = (part.strip() for part in specification.split("::", 1))
+            try:
+                task = self.tasks.add(schedule, prompt)
+                self.console.print(f"Recurring task created: {task.id}; next run: {task.next_run_at}")
+            except ValueError as exc:
+                self.console.print(f"Task error: {exc}")
+        elif len(parts) >= 3 and action in {"pause", "resume", "delete", "run"}:
+            task_id = parts[2]
+            if action == "delete":
+                self.console.print(f"Deleted {task_id}." if self.tasks.delete(task_id) else "Task not found.")
+            elif action in {"pause", "resume"}:
+                task = self.tasks.update_enabled(task_id, action == "resume")
+                self.console.print(f"{action.title()}d {task_id}." if task else "Task not found.")
+            else:
+                task = next((item for item in self.tasks.list() if item.id == task_id), None)
+                self.console.print(self._run_task(task) if task else "Task not found.")
+        else:
+            self.console.print("Usage: /task add|list|pause|resume|run|delete")
+
+    def _task_loop(self) -> None:
+        while not self._task_stop.is_set():
+            due = self.tasks.due()
+            if due:
+                result = self._run_task(due[0])
+                self.console.print(Panel(result, title=f"Recurring task {due[0].id}"))
+            self._task_stop.wait(1.0)
+
+    def _run_task(self, task) -> str:
+        self.tasks.mark_started(task.id)
+        try:
+            result = self.orchestrator.handle_text(task.prompt)
+        except Exception as exc:
+            result = f"Failed: {exc}"
+        self.tasks.mark_finished(task.id, result)
+        return result
 
     def _setup_provider(self) -> None:
         labels = {str(index): provider for index, (provider, label) in enumerate(provider_labels(), 1)}
@@ -790,7 +866,7 @@ class RichTUI:
 
     def _speak_in_thread(self, text: str) -> None:
         try:
-            self.voice_io.speak(text)
+            self.voice_io.speak(self.orchestrator.summarize_for_voice(text))
         except Exception as exc:
             self.console.print(Panel(str(exc), title="TTS error"))
 

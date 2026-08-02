@@ -41,6 +41,14 @@ class SirinaConfig(BaseModel):
     onnx_device: Literal["auto", "cpu", "cuda"] = "auto"
     normalize_tts_text: bool = True
     isolate_tts_process: bool = True
+    voice_summary_enabled: bool = True
+    voice_summary_model: str = "Falconsai/text_summarization"
+    voice_summary_model_path: Path = Path("models/voice-summary")
+    voice_summary_after_chars: int = Field(default=600, ge=100)
+    voice_summary_max_chars: int = Field(default=420, ge=100, le=2000)
+    voice_summary_max_input_tokens: int = Field(default=480, ge=128, le=2048)
+    voice_summary_max_chunks: int = Field(default=6, ge=1, le=32)
+    voice_summary_max_output_tokens: int = Field(default=96, ge=24, le=512)
 
 
 class MemoryConfig(BaseModel):
@@ -300,6 +308,35 @@ class CommandSkillConfig(BaseModel):
             "ip",
             "journalctl",
             "which",
+            "date",
+            "cal",
+            "hostname",
+            "hostnamectl",
+            "id",
+            "groups",
+            "free",
+            "vmstat",
+            "lscpu",
+            "lspci",
+            "lsusb",
+            "stat",
+            "file",
+            "du",
+            "head",
+            "tail",
+            "wc",
+            "sort",
+            "uniq",
+            "cut",
+            "grep",
+            "awk",
+            "echo",
+            "printf",
+            "readlink",
+            "realpath",
+            "ping",
+            "traceroute",
+            "tracepath",
         ]
     )
     denied_commands: list[str] = Field(

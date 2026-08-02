@@ -69,15 +69,19 @@ def test_system_clipboard_uses_discovered_native_writer(monkeypatch):
 
     class Result:
         returncode = 0
+        stdout = "login-url"
 
     def run(command, **kwargs):
-        calls.append((command, kwargs["input"]))
+        calls.append((command, kwargs.get("input")))
         return Result()
 
     monkeypatch.setattr("sirina_agent.tui.textual_app.subprocess.run", run)
 
     assert _set_system_clipboard_text("login-url")
-    assert calls == [(["/dynamic/clipboard", "-selection", "clipboard"], "login-url")]
+    assert calls == [
+        (["/dynamic/clipboard", "-selection", "clipboard"], "login-url"),
+        (["/dynamic/clipboard", "-selection", "clipboard", "-o"], None),
+    ]
 
 
 def test_system_clipboard_reads_from_discovered_native_backend(monkeypatch):
