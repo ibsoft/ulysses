@@ -154,7 +154,7 @@ Ulysses requires Linux and Python 3.11 or newer. On Kali Linux, Ubuntu, Debian, 
 ```bash
 sudo apt update
 sudo apt install -y git curl python3 python3-venv python3-dev build-essential \
-  portaudio19-dev libsndfile1 ripgrep xclip
+  portaudio19-dev libsndfile1 ripgrep xclip gnome-keyring libsecret-tools
 ```
 
 Use `wl-clipboard` instead of `xclip` for a Wayland-only desktop:

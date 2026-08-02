@@ -7,7 +7,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
-SPEECH_SUMMARY_AFTER_CHARS = 260
+SPEECH_SUMMARY_AFTER_CHARS = 600
 SPEECH_SUMMARY_MAX_CHARS = 320
 
 
@@ -164,11 +164,14 @@ class SirinaSpeechIO:
 
 
 def summarize_for_speech(text: str, force: bool = False) -> str:
-    spoken = _clean_spoken_text(text)
+    safe_text = _remove_unsafe_speech_content(text)
+    spoken = _clean_spoken_text(safe_text)
+    if not spoken:
+        return "Code or command omitted. See the transcript."
     if not force and len(spoken) <= SPEECH_SUMMARY_AFTER_CHARS:
         return spoken
 
-    parts = _summary_parts(text)
+    parts = _summary_parts(safe_text)
     summary = "Summary: " + " ".join(parts)
     return _clip_sentence(summary, SPEECH_SUMMARY_MAX_CHARS)
 
@@ -201,6 +204,28 @@ def _clean_spoken_text(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[*_#>~|]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _remove_unsafe_speech_content(text: str) -> str:
+    """Remove code and switch-heavy commands from voice output, not the transcript."""
+    safe_lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if re.match(r"^(?:```|~~~)", stripped):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith(("    ", "\t")):
+            continue
+        if len(re.findall(r"(?<!\w)--?[A-Za-z0-9]", line)) >= 2:
+            continue
+        line = re.sub(
+            r"`([^`]+)`",
+            lambda match: match.group(1) if re.fullmatch(r"(?:job|sess)_[A-Za-z0-9_-]+", match.group(1)) else "",
+            line,
+        )
+        safe_lines.append(line)
+    return "\n".join(safe_lines)
 
 
 def _clip_sentence(text: str, max_chars: int) -> str:
