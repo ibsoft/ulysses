@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PRESERVE_CONFIG=false
+PRESERVE_CONFIG=true
 SYNC_ONLY=false
 for argument in "$@"; do
   case "${argument}" in
   --preserve-config)
     PRESERVE_CONFIG=true
     ;;
+  --replace-config)
+    PRESERVE_CONFIG=false
+    ;;
   --sync-only)
     SYNC_ONLY=true
     ;;
   *)
     printf "error: unknown option: %s\n" "${argument}" >&2
-    printf "usage: %s [--sync-only] [--preserve-config]\n" "$0" >&2
+    printf "usage: %s [--sync-only] [--preserve-config] [--replace-config]\n" "$0" >&2
     exit 2
     ;;
   esac
@@ -41,6 +44,44 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
   fi
 fi
 CODEX_BIN_DISCOVERED="$(command -v codex 2>/dev/null || true)"
+
+detect_onnx_device() {
+  local config_file="${PROJECT_ROOT}/config/ulysses.yaml"
+  local configured="auto"
+  if [[ -f "${CONFIG_HOME}/ulysses.yaml" ]]; then
+    config_file="${CONFIG_HOME}/ulysses.yaml"
+  fi
+  configured="$(awk '
+    /^sirina:/ { in_sirina=1; next }
+    in_sirina && /^[^[:space:]]/ { exit }
+    in_sirina && $1 == "onnx_device:" { print $2; exit }
+  ' "${config_file}")"
+  local requested="${ULYSSES_ONNX_DEVICE:-${configured:-auto}}"
+  case "${requested}" in
+  cpu)
+    printf "cpu"
+    return 0
+    ;;
+  cuda)
+    printf "cuda"
+    return 0
+    ;;
+  auto)
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+      printf "cuda"
+    else
+      printf "cpu"
+    fi
+    return 0
+    ;;
+  *)
+    printf "ULYSSES_ONNX_DEVICE must be auto, cpu, or cuda (received: %s)\n" "${requested}" >&2
+    return 2
+    ;;
+  esac
+}
+
+ONNX_DEVICE="$(detect_onnx_device)"
 
 INTERACTIVE=false
 ACCENT=''
@@ -268,6 +309,21 @@ install_agent_dependencies() {
   local torch_index="${ULYSSES_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}"
   "${APP_HOME}/venv/bin/python" -m pip install torch --index-url "${torch_index}"
   "${APP_HOME}/venv/bin/python" -m pip install -e "${APP_SOURCE}[agent]"
+  if [[ "${ONNX_DEVICE}" == "cuda" ]]; then
+    "${APP_HOME}/venv/bin/python" -m pip uninstall -y onnxruntime onnxruntime-gpu
+    if "${APP_HOME}/venv/bin/python" -m pip install --force-reinstall onnxruntime-gpu &&
+      "${APP_HOME}/venv/bin/python" -c \
+        'import onnxruntime as ort; raise SystemExit(0 if "CUDAExecutionProvider" in ort.get_available_providers() else 1)'; then
+      printf "CUDA inference enabled with CUDAExecutionProvider.\n"
+    else
+      printf "CUDA runtime verification failed; restoring CPU inference.\n" >&2
+      "${APP_HOME}/venv/bin/python" -m pip uninstall -y onnxruntime-gpu
+      "${APP_HOME}/venv/bin/python" -m pip install --force-reinstall onnxruntime
+    fi
+  else
+    "${APP_HOME}/venv/bin/python" -m pip uninstall -y onnxruntime-gpu
+    "${APP_HOME}/venv/bin/python" -m pip install --force-reinstall onnxruntime
+  fi
 }
 
 run_animated "Preparing installation directories" prepare_directories
@@ -285,7 +341,7 @@ else
   run_animated "Validating Python 3.11+" validate_python
   run_animated "Preparing isolated Python environment" prepare_virtual_environment
   run_animated "Upgrading Python package tooling" "${APP_HOME}/venv/bin/python" -m pip install --upgrade pip
-  run_animated "Installing CPU inference runtime, Ulysses, and agent dependencies" install_agent_dependencies
+  run_animated "Installing ${ONNX_DEVICE^^} inference runtime, Ulysses, and agent dependencies" install_agent_dependencies
   run_animated "Checking and preparing Sirina voice models" prepare_models
 fi
 
@@ -299,6 +355,9 @@ write_configuration() {
   fi
   if grep -q '^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$' "${CONFIG_HOME}/ulysses.yaml"; then
     sed -i 's/^[[:space:]]*tts_voice:[[:space:]]*sirina[[:space:]]*$/  tts_voice: am_michael/' "${CONFIG_HOME}/ulysses.yaml"
+  fi
+  if ! grep -q '^[[:space:]]*onnx_device:' "${CONFIG_HOME}/ulysses.yaml"; then
+    sed -i '/^[[:space:]]*tts_voice:/a\  onnx_device: auto' "${CONFIG_HOME}/ulysses.yaml"
   fi
   if ! grep -q '^[[:space:]]*bypass_confirmation_for_allowed_commands:' "${CONFIG_HOME}/ulysses.yaml"; then
     sed -i '/^[[:space:]]*godmode:/a\    bypass_confirmation_for_allowed_commands: true' "${CONFIG_HOME}/ulysses.yaml"

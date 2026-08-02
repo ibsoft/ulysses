@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .audio.sirina_io import SirinaSpeechIO
@@ -26,7 +27,9 @@ from .utils.logging import audit_logger, configure_logging
 
 
 def build_agent(config_path: str | Path | None = None) -> tuple[AgentOrchestrator, SirinaSpeechIO]:
+    onnx_device_override = os.environ.get("ULYSSES_ONNX_DEVICE")
     config = load_config(config_path)
+    os.environ["ULYSSES_ONNX_DEVICE"] = onnx_device_override or config.sirina.onnx_device
     configure_logging(config.logging.directory, config.logging.level, config.logging.max_bytes, config.logging.backups)
     sessions = SessionStore(config.memory.sqlite_path)
     embeddings = LocalHashEmbeddingProvider(config.memory.dimension)

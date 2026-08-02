@@ -191,11 +191,27 @@ class AgentOrchestrator:
             elif msg.role == "tool":
                 messages.append({"role": "system", "content": f"Previous tool result: {msg.content}"})
         tools = self._tool_schemas()
-        self._activity("calling my LLM brain")
-        response = self.llm.complete(messages, tools=tools)
+        command_assignment = self._is_command_assignment(text)
+        external_network_task = self._is_external_network_task(text)
+        require_tool = getattr(self.llm, "complete_with_required_tool", None)
+        require_tool_brief = getattr(self.llm, "complete_with_required_tool_brief", None)
+        if external_network_task and callable(require_tool_brief):
+            self._activity("asking LLM Brain for one bounded network command plan")
+            response = require_tool_brief(
+                messages,
+                tools,
+                "system_command",
+                timeout_seconds=self.config.llm.network_planning_timeout_seconds,
+            )
+        elif command_assignment and callable(require_tool):
+            self._activity("asking LLM Brain for one command plan")
+            response = require_tool(messages, tools, "system_command")
+        else:
+            self._activity("calling my LLM brain")
+            response = self.llm.complete(messages, tools=tools)
         message = response["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
-        if not tool_calls and self._is_command_assignment(text):
+        if not tool_calls and command_assignment:
             self._activity("requesting executable tool call")
             messages.append({"role": "assistant", "content": message.get("content") or ""})
             messages.append(
@@ -210,7 +226,6 @@ class AgentOrchestrator:
                     ),
                 }
             )
-            require_tool = getattr(self.llm, "complete_with_required_tool", None)
             if callable(require_tool):
                 response = require_tool(messages, tools, "system_command")
             else:
@@ -218,7 +233,13 @@ class AgentOrchestrator:
             message = response["choices"][0]["message"]
             tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            content = self._handle_tool_calls(messages, message, tool_calls, tools)
+            content = self._handle_tool_calls(
+                messages,
+                message,
+                tool_calls,
+                tools,
+                compact_command_completion=external_network_task,
+            )
             if subagent_reports:
                 self.subagents.mark_reported([item["id"] for item in subagent_reports])
             return content
@@ -232,14 +253,34 @@ class AgentOrchestrator:
     @staticmethod
     def _is_command_assignment(text: str) -> bool:
         request = text.strip().lower()
-        if not request or re.search(r"\b(?:how to|how do i|what command|which command|explain|example)\b", request):
+        if not request or re.search(r"\b(?:how to|how do i|what command|which command|explain)\b", request):
+            return False
+        if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", request):
+            return False
+        if re.search(r"^(?:give|show|provide)\s+(?:me\s+)?(?:an?\s+)?example\b", request):
             return False
         return bool(
             re.search(
                 r"^(?:please\s+)?(?:run|execute|install|uninstall|remove|update|upgrade|start|stop|restart|"
-                r"enable|disable|scan|check|inspect|list|show|find|create|copy|move|rename|download)\b",
+                r"enable|disable|scan|check|inspect|list|show|find|create|copy|move|rename|download|"
+                r"ping|dig|nslookup|whois|traceroute|tracepath|curl)\b",
                 request,
             )
+        )
+
+    @staticmethod
+    def _is_external_network_task(text: str) -> bool:
+        request = text.strip().lower()
+        if not AgentOrchestrator._is_command_assignment(text):
+            return False
+        return bool(
+            re.search(
+                r"\b(?:network|port|ports|scan|nmap|ping|dns|dig|nslookup|whois|traceroute|tracepath|"
+                r"curl|http|https|website|domain|host|tls|ssl|certificate|whatweb|nikto|nuclei)\b",
+                request,
+            )
+            or re.search(r"\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,63}\b", request)
+            or re.search(r"https?://", request)
         )
 
     def _tool_schemas(self) -> list[dict]:
@@ -397,20 +438,11 @@ class AgentOrchestrator:
 
     def _direct_system_command_plan(self, text: str) -> list[str] | None:
         lowered = text.strip().lower()
-        nmap_target = self._nmap_target(text)
-        if nmap_target and "os" in lowered and "version" in lowered:
-            return [f"nmap -O {nmap_target}"]
         if "status" in lowered and "disk" in lowered and "filesystem" in lowered:
             return ["df -h", "lsblk"]
         return None
 
-    def _nmap_target(self, text: str) -> str | None:
-        match = re.search(r"\brun\s+nmap\s+(?:to|on)\s+([A-Za-z0-9_.:-]+)\b", text, re.IGNORECASE)
-        if not match:
-            return None
-        return match.group(1)
-
-    def _run_command_plan(self, user_request: str, commands: list[str]) -> str:
+    def _run_command_plan(self, user_request: str, commands: list[str], *, compact: bool = False) -> str:
         self._activity(f"planned {len(commands)} commands")
         outputs = []
         for index, command in enumerate(commands, start=1):
@@ -435,7 +467,12 @@ class AgentOrchestrator:
                 outputs.append("Continuing with remaining planned checks where possible.")
                 continue
             self._activity(f"command complete: {command}")
-        return self.answer_from_tool_result(user_request, "\n\n".join(outputs))
+        combined_output = "\n\n".join(outputs)
+        if compact:
+            self._activity("saving answer")
+            self._save_assistant_message(combined_output)
+            return combined_output
+        return self.answer_from_tool_result(user_request, combined_output)
 
     def _handle_tool_calls(
         self,
@@ -450,6 +487,9 @@ class AgentOrchestrator:
         last_tool_content = ""
         last_tool_result: SkillResult | None = None
         last_tool_arguments: dict = {}
+        compact_outputs: list[str] = []
+        if compact_command_completion:
+            tool_calls = tool_calls[:1]
         for _ in range(4):
             assistant_tool_calls = []
             tool_results = []
@@ -516,6 +556,10 @@ class AgentOrchestrator:
                 self._record_tool_result(name, result.content, {"skill": name, "ok": result.ok, "data": result.data})
                 tool_results.append((tool_call_id, name, result.content))
                 last_tool_content = result.content
+                if compact_command_completion:
+                    command = str(arguments.get("command") or "") if name == "system_command" else ""
+                    label = f"$ {command}\n" if command else f"{name}:\n"
+                    compact_outputs.append(f"{label}{result.content}".strip())
                 if not result.ok:
                     self._activity(f"tool failed: {name}")
                     if name == "create_skill":
@@ -526,6 +570,12 @@ class AgentOrchestrator:
                         return content
                     continue
                 self._activity(f"tool complete: {name}")
+
+            if compact_command_completion and compact_outputs:
+                content = "\n\n".join(compact_outputs)
+                self._activity("saving answer")
+                self._save_assistant_message(content)
+                return content
 
             messages.append(
                 {"role": "assistant", "content": message.get("content") or "", "tool_calls": assistant_tool_calls}
@@ -602,8 +652,11 @@ class AgentOrchestrator:
                 safe_arguments.pop("sudo_password", None)
                 return SkillResult(False, f"Tool `{name}` is not available.", {"tool": name, "arguments": safe_arguments})
             activity_label = skill.manifest.activity_label
-            if name == "system_command" and re.search(r"\b(?:install|installation)\b", str(arguments.get("command", "")), re.I):
-                activity_label = "installing"
+            if name == "system_command":
+                command = str(arguments.get("command", "")).strip()
+                activity_label = f"running command: {command}" if command else activity_label
+                if re.search(r"\b(?:install|installation)\b", command, re.I):
+                    activity_label = f"installing: {command}"
             self._activity(activity_label)
             if name == "create_skill" and not arguments.get("generated_source"):
                 prepared = self._prepare_complete_skill(arguments)
@@ -863,26 +916,32 @@ class AgentOrchestrator:
         metadata = self.sessions.session_metadata(self.session_id)
         previous = str(metadata.get("startup_greeting") or "")
         moment = datetime.now().strftime("%A %H:%M")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Speak as Ulysses, a calm senior defensive security operator. Produce one fresh, intelligent "
+                    "startup greeting of 12 to 24 words. Convey exceptional technical judgment, confidence, and "
+                    "command of security operations through precise language rather than explicit boasting. Make "
+                    "it natural and security-minded, not a system status report. Do not use Markdown, clichés, or "
+                    "claim that checks were performed. Return only the greeting."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"Current local moment: {moment}. Previous greeting to avoid: {previous or 'none'}.",
+            },
+        ]
         try:
-            response = self.llm.complete(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Speak as Ulysses, a calm senior defensive security operator. Produce one fresh, intelligent "
-                            "startup greeting of 12 to 24 words. Convey exceptional technical judgment, confidence, and "
-                            "command of security operations through precise language rather than explicit boasting. Make "
-                            "it natural and security-minded, not a system status report. Do not use Markdown, clichés, or "
-                            "claim that checks were performed. Return only the greeting."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Current local moment: {moment}. Previous greeting to avoid: {previous or 'none'}.",
-                    },
-                ],
-                tools=None,
-            )
+            complete_brief = getattr(self.llm, "complete_brief", None)
+            if callable(complete_brief):
+                response = complete_brief(
+                    messages,
+                    max_tokens=64,
+                    timeout_seconds=self.config.llm.startup_greeting_timeout_seconds,
+                )
+            else:
+                response = self.llm.complete(messages, tools=None)
             greeting = (response["choices"][0]["message"].get("content") or "").strip()
         except Exception:
             greeting = ""

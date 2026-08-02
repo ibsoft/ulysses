@@ -18,7 +18,7 @@ PROVIDER_DEFAULTS = {
     "kimi": {
         "provider": "kimi",
         "base_url": "https://api.moonshot.ai/v1",
-        "model": "kimi-k2-0711-preview",
+        "model": "kimi-k2.7-code",
         "api_key_env": "KIMI_API_KEY",
     },
     "ollama": {
@@ -126,7 +126,15 @@ def setup_from_provider(provider: str) -> ProviderSetup:
 def provider_labels() -> list[tuple[str, str]]:
     return [
         ("openai", "OpenAI API key"),
-        ("openai_chatgpt", "OpenAI browser"),
+        ("openai_chatgpt", "OpenAI-Codex"),
         ("kimi", "Kimi"),
         ("ollama", "Ollama"),
     ]
+
+
+def complete_name_onboarding(config: UlyssesConfig, config_path: Path) -> None:
+    """Persist that the one-time preferred-name prompt has been delivered or migrated."""
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    data.setdefault("tui", {})["name_prompt_completed"] = True
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    config.tui.name_prompt_completed = True

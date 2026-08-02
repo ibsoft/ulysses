@@ -27,6 +27,7 @@ from sirina_agent.config.security_settings import persist_godmode
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
+    complete_name_onboarding,
     default_for,
     env_path_for_config,
     load_env_file,
@@ -198,7 +199,7 @@ class ProviderSetupScreen(ModalScreen[ProviderSetup | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
             yield Label("Provider setup")
-            yield Static("OpenAI browser login opens your browser and stores no OAuth token in Ulysses.")
+            yield Static("OpenAI-Codex login opens your browser and stores no OAuth token in Ulysses.")
             with Horizontal(id="setup-provider-buttons"):
                 for provider, label in provider_labels():
                     yield Button(label, id=f"setup-provider-{provider}")
@@ -302,7 +303,7 @@ class OpenAICallbackScreen(ModalScreen[str | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="openai-callback-dialog"):
-            yield Label("OpenAI browser login")
+            yield Label("OpenAI-Codex login")
             yield Static("Copy the login link, open it in your browser, and sign in to OpenAI.")
             yield Input(value=self.auth_url, select_on_focus=True, id="openai-login-url")
             with Horizontal(id="openai-login-actions"):
@@ -572,8 +573,8 @@ class MCPSetupScreen(ModalScreen[MCPServerSetup | None]):
 
 
 class UlyssesTextualApp(App):
-    TITLE = "Ulysses"
-    SUB_TITLE = "local-first AI voice agent"
+    TITLE = "ULYSSES"
+    SUB_TITLE = "VAPT - PENTEST - VULNERABILITY ASSESSOR"
 
     CSS = """
     Screen {
@@ -734,6 +735,7 @@ class UlyssesTextualApp(App):
         self._listen_cancel_requested = False
         self._speech_id = 0
         self._activity_text = "thinking"
+        self._activity_started_at = time.monotonic()
         self._spinner = cycle(self.ACTIVITY_FRAMES)
         self.selection_mode = False
         self._autonomous_running = False
@@ -868,6 +870,8 @@ class UlyssesTextualApp(App):
                 self._speak(guidance)
                 self.set_timer(0.4, self.action_setup)
             else:
+                self._start_waiting()
+                self._set_activity("calling LLM Brain for startup greeting")
                 Thread(target=self._startup_greeting_in_thread, daemon=True).start()
             return
         completed = min(5, int(elapsed / 0.36))
@@ -876,12 +880,22 @@ class UlyssesTextualApp(App):
         self.query_one("#boot-status", Static).update(_boot_progress(self._boot_message, completed, frame))
 
     def _startup_greeting_in_thread(self) -> None:
-        greeting = self.orchestrator.startup_greeting()
+        try:
+            greeting = self.orchestrator.startup_greeting()
+        except Exception as exc:
+            self.call_from_thread(self._finish_startup_greeting_error, str(exc))
+            return
         self.call_from_thread(self._deliver_startup_greeting, greeting)
 
     def _deliver_startup_greeting(self, greeting: str) -> None:
+        self._stop_waiting()
         self._write_assistant(greeting)
         self._speak(f"{self._boot_spoken_message} {greeting}")
+
+    def _finish_startup_greeting_error(self, error: str) -> None:
+        self._stop_waiting()
+        self._write_error(f"Startup greeting failed: {error}")
+        self._refresh_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -942,6 +956,19 @@ class UlyssesTextualApp(App):
         if self.orchestrator.pending_tool_requires_sudo_password():
             pending = self.orchestrator.pending_tool or {}
             self._open_sudo_password_dialog(pending.get("token"))
+            return
+        if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", original_text, re.I):
+            self._write_user(display_text)
+            report_path, guidance = self.artifacts.resolve_report(original_text, self._assessment_project)
+            if report_path is None:
+                self._write_system(guidance)
+            else:
+                try:
+                    report = report_path.read_text(encoding="utf-8")
+                    self._write_assistant(f"{report}\n\nLoaded report:\n{report_path}")
+                except OSError as exc:
+                    self._write_error(f"Report could not be opened: {exc}")
+            self._refresh_status()
             return
         new_assessment = is_assessment_request(original_text)
         assessment_request = new_assessment or (
@@ -1910,7 +1937,7 @@ class UlyssesTextualApp(App):
     ) -> None:
         if not callback_url:
             login.close()
-            self._write_system("OpenAI browser login cancelled.")
+            self._write_system("OpenAI-Codex login cancelled.")
             return
         self._start_waiting()
         Thread(target=self._complete_openai_login, args=(callback_url, login, setup), daemon=True).start()
@@ -1954,9 +1981,19 @@ class UlyssesTextualApp(App):
             f"{self.orchestrator.config.llm.provider} / {self.orchestrator.config.llm.model}\n"
             f"{self.orchestrator.config.llm.base_url}"
         )
-        question = "Provider setup is complete. How would you like me to address you?"
-        self._write_assistant(question)
-        self._speak(question)
+        first_run_name_prompt = (
+            not self.orchestrator.config.tui.name_prompt_completed
+            and self.orchestrator.sessions.message_count(self.orchestrator.session_id) == 0
+        )
+        if not self.orchestrator.config.tui.name_prompt_completed:
+            try:
+                complete_name_onboarding(self.orchestrator.config, config_path)
+            except Exception as exc:
+                self._write_error(f"Could not save onboarding state: {exc}")
+        if first_run_name_prompt:
+            question = "Provider setup is complete. How would you like me to address you?"
+            self._write_assistant(question)
+            self._speak(question)
         self._refresh_status()
 
     def action_voice_toggle(self) -> None:
@@ -2174,7 +2211,7 @@ class UlyssesTextualApp(App):
     def _local_version_text(self) -> str:
         version = self.updates.installed_branch or f"v{self.orchestrator.config.agent_version}"
         update_label = " (update)" if self.updates.status.state in {"available", "staged"} else ""
-        return f"{self.orchestrator.config.agent_name} {version}{update_label}"
+        return f"{self.orchestrator.config.agent_name.upper()} {version}{update_label}"
 
     def _refresh_version_labels(self) -> None:
         self.title = self._local_version_text()
@@ -2288,7 +2325,8 @@ class UlyssesTextualApp(App):
             self.query_one("#spinner", Static).update(message)
 
     def _activity_label(self) -> str:
-        return f"Ulysses: {self._activity_text}"
+        elapsed = max(0, int(time.monotonic() - self._activity_started_at))
+        return f"Ulysses: {self._activity_text} [{elapsed}s]"
 
     @staticmethod
     def _activity_renderable(frame: str, label: str, gap: str = " ") -> Text:
@@ -2298,9 +2336,13 @@ class UlyssesTextualApp(App):
         try:
             self.call_from_thread(self._set_activity, message)
         except RuntimeError:
+            if message != self._activity_text:
+                self._activity_started_at = time.monotonic()
             self._activity_text = message
 
     def _set_activity(self, message: str) -> None:
+        if message != self._activity_text:
+            self._activity_started_at = time.monotonic()
         self._activity_text = message
         if self._waiting or self._speaking or self._listening:
             self.query_one("#spinner", Static).update(

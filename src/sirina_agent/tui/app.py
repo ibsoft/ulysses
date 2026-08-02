@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import replace
 from threading import Thread
 
@@ -15,6 +16,7 @@ from sirina_agent.config.security_settings import persist_godmode
 from sirina_agent.config.provider_setup import (
     ProviderSetup,
     apply_provider_setup,
+    complete_name_onboarding,
     default_for,
     env_path_for_config,
     load_env_file,
@@ -92,7 +94,11 @@ class RichTUI:
             self._speak(guidance)
             self._setup_provider()
         else:
-            greeting = self.orchestrator.startup_greeting()
+            with self.console.status(
+                "[bold magenta]Calling LLM Brain for startup greeting...[/bold magenta]",
+                spinner="dots",
+            ):
+                greeting = self.orchestrator.startup_greeting()
             self.console.print(Panel(greeting, title="Ulysses"))
             self._speak(f"{spoken_startup_brief(self.orchestrator, self.voice_io)} {greeting}")
         self.connectors.start_all()
@@ -112,6 +118,17 @@ class RichTUI:
             if text.startswith("/"):
                 if self._command(text):
                     break
+                continue
+            if re.search(r"\b(?:show|open|display|view|read|list)\b.*\breports?\b", text, re.I):
+                report_path, guidance = self.artifacts.resolve_report(text, self._assessment_project)
+                if report_path is None:
+                    self.console.print(Panel(guidance, title="Ulysses"))
+                else:
+                    try:
+                        report = report_path.read_text(encoding="utf-8")
+                        self.console.print(Panel(f"{report}\n\nLoaded report:\n{report_path}", title="Ulysses"))
+                    except OSError as exc:
+                        self.console.print(Panel(f"Report could not be opened: {exc}", title="Ulysses error"))
                 continue
             new_assessment = is_assessment_request(text)
             assessment_request = new_assessment or (
@@ -523,12 +540,12 @@ class RichTUI:
         if provider == "openai_chatgpt":
             login = OpenAIBrowserLogin()
             try:
-                with self.console.status("Preparing OpenAI browser login...", spinner="dots"):
+                with self.console.status("Preparing OpenAI-Codex login...", spinner="dots"):
                     login.start()
                 self.console.print("Open this login link in your browser:")
                 self.console.print(login.auth_url, markup=False, soft_wrap=True)
                 callback_url = Prompt.ask("Paste the localhost return URL", password=True)
-                with self.console.status("Completing OpenAI browser login...", spinner="dots"):
+                with self.console.status("Completing OpenAI-Codex login...", spinner="dots"):
                     model = login.complete(callback_url)
                 setup = replace(setup, model=model, base_url="", api_key_env="", api_key="")
             except OpenAIBrowserLoginError as exc:
@@ -553,9 +570,19 @@ class RichTUI:
             f"Provider saved and activated: {self.orchestrator.config.llm.provider} / "
             f"{self.orchestrator.config.llm.model}"
         )
-        question = "Provider setup is complete. How would you like me to address you?"
-        self.console.print(Panel(question, title="Ulysses"))
-        self._speak(question)
+        first_run_name_prompt = (
+            not self.orchestrator.config.tui.name_prompt_completed
+            and self.orchestrator.sessions.message_count(self.orchestrator.session_id) == 0
+        )
+        if not self.orchestrator.config.tui.name_prompt_completed:
+            try:
+                complete_name_onboarding(self.orchestrator.config, config_path)
+            except Exception as exc:
+                self.console.print(Panel(str(exc), title="Could not save onboarding state"))
+        if first_run_name_prompt:
+            question = "Provider setup is complete. How would you like me to address you?"
+            self.console.print(Panel(question, title="Ulysses"))
+            self._speak(question)
 
     def _setup_connectors(self) -> None:
         definitions = connector_definitions()

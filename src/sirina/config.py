@@ -105,8 +105,13 @@ def get_onnx_providers(prefer_cuda: bool = False) -> list[str]:
     import onnxruntime as ort  # type: ignore
 
     providers = [provider for provider in ort.get_available_providers() if provider not in DISABLED_ONNX_PROVIDERS]
-    if prefer_cuda:
+    requested_device = os.getenv("ULYSSES_ONNX_DEVICE", "auto").strip().lower()
+    if requested_device == "cpu":
+        return ["CPUExecutionProvider"]
+    if requested_device == "cuda" or prefer_cuda:
         if "CUDAExecutionProvider" in providers:
             return ["CUDAExecutionProvider", "CPUExecutionProvider"]
         return ["CPUExecutionProvider"]
+    if "CUDAExecutionProvider" in providers:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
     return providers

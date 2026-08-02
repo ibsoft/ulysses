@@ -5,6 +5,8 @@ llm:
   model: gpt-4.1-mini
   base_url: https://api.openai.com/v1
   api_key_env: OPENAI_API_KEY
+  startup_greeting_timeout_seconds: 10
+  network_planning_timeout_seconds: 15
 audio:
   enabled: true
   text_only: false
@@ -22,6 +24,7 @@ wake_word:
 sirina:
   stt_engine: tdt
   tts_voice: am_michael
+  onnx_device: auto
   isolate_tts_process: true
 connectors:
   telegram:
@@ -167,6 +170,7 @@ logging:
   directory: var/ulysses/logs
 tui:
   theme: ulysses_dark
+  name_prompt_completed: false
 updates:
   enabled: true
   check_on_startup: true
