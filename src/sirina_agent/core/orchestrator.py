@@ -300,11 +300,11 @@ class AgentOrchestrator:
         cfg = self.config.context
         if not cfg.auto_consolidate:
             return
-        count = self.sessions.message_count(self.session_id)
-        chars = self.sessions.total_message_chars(self.session_id)
         usage = self.context_usage()
-        if count <= cfg.max_messages and chars <= cfg.max_chars and usage["percent"] < 100:
+        if usage["percent"] < cfg.rollover_threshold_percent:
             return
+        count = self.sessions.message_count(self.session_id)
+        at_capacity = True
         messages = self.sessions.messages(self.session_id, limit=max(count, cfg.keep_last_messages))
         old_messages = messages[: max(0, len(messages) - cfg.keep_last_messages)]
         if not old_messages:
@@ -321,6 +321,7 @@ class AgentOrchestrator:
             prompt += f"\n\nPrevious summary:\n{previous_summary}"
         prompt += f"\n\nMessages to consolidate:\n{transcript}"
         try:
+            self._activity("summarizing context with LLM Brain")
             response = self.llm.complete(
                 [
                     {"role": "system", "content": "You summarize conversation history for a local AI agent."},
@@ -331,9 +332,29 @@ class AgentOrchestrator:
             summary = response["choices"][0]["message"].get("content") or ""
         except Exception:
             return
-        metadata["summary"] = summary[: cfg.summary_target_chars * 2]
+        consolidated_summary = summary[: cfg.summary_target_chars * 2]
+        metadata["summary"] = consolidated_summary
         metadata["summary_message_count"] = metadata.get("summary_message_count", 0) + len(old_messages)
         metadata["summary_updated_at"] = datetime.now(UTC).isoformat()
+        if at_capacity:
+            previous_session_id = self.session_id
+            recent_messages = messages[-cfg.keep_last_messages :] if cfg.keep_last_messages > 0 else []
+            continuation_metadata = {
+                "summary": consolidated_summary,
+                "summary_message_count": metadata["summary_message_count"],
+                "summary_updated_at": metadata["summary_updated_at"],
+                "continued_from_session": previous_session_id,
+            }
+            continuation_id = self.sessions.create_session("Ulysses (continued)", continuation_metadata)
+            for message in recent_messages:
+                carried_metadata = dict(message.metadata)
+                carried_metadata["carried_from_session"] = previous_session_id
+                self.sessions.add_message(continuation_id, message.role, message.content, carried_metadata)
+            metadata["continued_in_session"] = continuation_id
+            self.sessions.update_session_metadata(previous_session_id, metadata)
+            self.session_id = continuation_id
+            self._activity("context summarized; continued in new session")
+            return
         self.sessions.update_session_metadata(self.session_id, metadata)
         self.sessions.prune_messages_keep_last(self.session_id, cfg.keep_last_messages)
 

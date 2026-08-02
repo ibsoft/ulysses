@@ -461,6 +461,10 @@ selects by list number, `show the latest report` selects the newest, and `show r
 matching assessment. Within an active assessment, `show me the report` prefers that project's newest report; otherwise an
 ambiguous request displays the list instead of guessing.
 
+At `context.rollover_threshold_percent` active-context usage (100% by default), automatic consolidation creates a new continuation session. The generated summary and the
+most recent configured messages are carried forward, while the complete previous session remains stored and linked to the
+new session.
+
 ## Providers
 
 Run `/setup providers` or press `F7` to open provider setup. The Textual dialog masks secret fields; the Rich fallback uses
@@ -683,7 +687,7 @@ independent of `/voice off` and `/mute`, which control spoken responses.
 
 ## Slash Commands
 
-`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/setup mcp`, `/mcp servers`, `/mcp tools`, `/mcp reconnect <server_id>`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/***autonomous on`, `/update`, `/update install`, `/status`, `/export`, `/quit`.
+`/new`, `/sessions`, `/switch <id>`, `/memory`, `/context`, `/forget <id>`, `/forget all`, `/skills`, `/config`, `/talk`, `/voice on`, `/voice off`, `/mute`, `/theme`, `/theme list`, `/setup providers`, `/setup connectors`, `/setup mcp`, `/mcp servers`, `/mcp tools`, `/mcp reconnect <server_id>`, `/create-skill <name> <request>`, `/autonomous on`, `/autonomous off`, `/update`, `/update install`, `/status`, `/export`, `/quit`.
 
 Autonomous mode is explicit opt-in. In the Textual TUI, Ulysses runs a defensive host-monitoring cycle for the local system it is installed on. Each cycle performs read-only evidence collection, stores every command output as tool history, scores suspicious evidence, adapts the next check interval when risk rises, and writes a defensive report to SQLite and FAISS memory. If voice is enabled and unmuted, the autonomous report is spoken.
 
@@ -711,7 +715,6 @@ Commands:
 /autonomous on
 /autonomous off
 /autonomous now
-/***autonomous on
 ```
 
 Create a complete skill:
