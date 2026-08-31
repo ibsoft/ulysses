@@ -57,11 +57,14 @@ from sirina_agent.core.assessment import (
     AssessmentCheck,
     AssessmentResult,
     AssessmentToolOption,
+    assessment_check_for_tool_option,
     assessment_checks,
     assessment_tool_options,
     missing_tool_installer_script,
     missing_tool_packages,
     render_assessment_report,
+    render_assessment_tool_selection,
+    select_assessment_tool_options,
 )
 from sirina_agent.core.tasks import TaskStore, format_tasks, parse_recurring_prompt
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
@@ -1023,7 +1026,7 @@ class UlyssesTextualApp(App):
             self._write_user(display_text)
             target = self._assessment_pending_tool_target
             options = list(self._assessment_pending_tool_options)
-            selected, error = _selected_assessment_options(original_text, options)
+            selected, error = select_assessment_tool_options(original_text, options)
             if error:
                 self._write_system(error)
                 return
@@ -1051,6 +1054,20 @@ class UlyssesTextualApp(App):
             self._assessment_pending_tool_target = None
             self._assessment_results = []
             self._assessment_completed_commands = set()
+            target = assessment_target(original_text)
+            if target:
+                direct_command = assessment_command_for_text(original_text, original_text)
+                options = assessment_tool_options(target, direct_command)
+                self._assessment_pending_tool_options = options
+                self._assessment_pending_tool_target = target
+                self._last_user_text = original_text
+                self._last_response_wants_report = True
+                self._set_project_result_capture(self._assessment_project)
+                self._write_user(display_text)
+                self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
+                self._write_system(render_assessment_tool_selection(target, options))
+                self._refresh_status()
+                return
         self._set_project_result_capture(self._assessment_project)
         text = (
             attachment_prompt(original_text, pasted_artifact)
@@ -1089,7 +1106,7 @@ class UlyssesTextualApp(App):
                     options = assessment_tool_options(target, direct_command)
                     self._assessment_pending_tool_options = options
                     self._assessment_pending_tool_target = target
-                    self._write_system(_assessment_tool_selection_prompt(target, options))
+                    self._write_system(render_assessment_tool_selection(target, options))
                     return
                 self._refresh_status()
                 self._start_waiting()
@@ -1207,7 +1224,7 @@ class UlyssesTextualApp(App):
         selected_options: list[AssessmentToolOption] | None = None,
     ) -> None:
         checks = (
-            [AssessmentCheck(option.id, _assessment_category_for_option(option.id), option.command) for option in selected_options]
+            [assessment_check_for_tool_option(option) for option in selected_options]
             if selected_options is not None
             else assessment_checks(target, preferred_command)
         )
@@ -2813,82 +2830,6 @@ def _active_command_policy(orchestrator):
 
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _assessment_tool_selection_prompt(target: str, options: list[AssessmentToolOption]) -> str:
-    lines = [
-        f"Assessment target: {target}",
-        "Available assessment tools. Choose which Ulysses may use before evidence collection starts:",
-    ]
-    for index, option in enumerate(options, start=1):
-        lines.append(f"{index}. {option.name} [{option.id}]")
-        lines.append(f"   Purpose: {option.purpose}")
-        lines.append(f"   Command: {option.command}")
-    lines.append("Reply with `all`, numbers such as `1,3,5`, or tool names such as `nmap tls nuclei`.")
-    return "\n".join(lines)
-
-
-def _selected_assessment_options(
-    text: str, options: list[AssessmentToolOption]
-) -> tuple[list[AssessmentToolOption], str | None]:
-    lowered = text.lower().strip()
-    if not lowered:
-        return [], _assessment_tool_selection_prompt("current target", options)
-    if re.search(r"\b(all|everything|baseline|default|recommended)\b", lowered):
-        return options, None
-
-    selected_indexes: set[int] = set()
-    for value in re.findall(r"\b\d+\b", lowered):
-        index = int(value)
-        if 1 <= index <= len(options):
-            selected_indexes.add(index - 1)
-
-    aliases = {
-        "dns": "dns",
-        "dig": "dns",
-        "headers": "http-headers",
-        "header": "http-headers",
-        "http": "http-headers",
-        "curl": "http-headers",
-        "service": "service-scan",
-        "services": "service-scan",
-        "port": "service-scan",
-        "ports": "service-scan",
-        "nmap": "service-scan",
-        "fingerprint": "web-fingerprint",
-        "whatweb": "web-fingerprint",
-        "tls": "tls",
-        "ssl": "tls",
-        "sslscan": "tls",
-        "nikto": "web-misconfiguration",
-        "misconfiguration": "web-misconfiguration",
-        "nuclei": "template-scan",
-        "template": "template-scan",
-        "requested": "requested-check",
-        "custom": "requested-check",
-    }
-    wanted_ids = {aliases[token] for token in re.findall(r"[a-z][a-z0-9_-]*", lowered) if token in aliases}
-    for index, option in enumerate(options):
-        if option.id in wanted_ids or option.id in lowered or option.name.lower() in lowered:
-            selected_indexes.add(index)
-
-    if not selected_indexes:
-        prompt = _assessment_tool_selection_prompt("current target", options)
-        return [], f"Choose at least one listed assessment tool before I run the assessment.\n\n{prompt}"
-    return [options[index] for index in sorted(selected_indexes)], None
-
-
-def _assessment_category_for_option(option_id: str) -> str:
-    return {
-        "dns": "Discovery",
-        "http-headers": "HTTP",
-        "service-scan": "Network",
-        "web-fingerprint": "Web",
-        "tls": "TLS",
-        "web-misconfiguration": "Web",
-        "template-scan": "Web",
-        "requested-check": "Requested",
-    }.get(option_id, "Requested")
 
 
 def _run_system_command_capture(orchestrator, command: str) -> tuple[str, bool]:

@@ -89,6 +89,86 @@ def assessment_tool_options(target: str, preferred_command: str | None = None) -
     return options
 
 
+def render_assessment_tool_selection(target: str, options: list[AssessmentToolOption]) -> str:
+    lines = [
+        f"Assessment target: {target}",
+        "Available assessment tools. Choose which Ulysses may use before evidence collection starts:",
+    ]
+    for index, option in enumerate(options, start=1):
+        lines.append(f"{index}. {option.name} [{option.id}]")
+        lines.append(f"   Purpose: {option.purpose}")
+        lines.append(f"   Command: {option.command}")
+    lines.append("Reply with `all`, numbers such as `1,3,5`, or tool names such as `nmap tls nuclei`.")
+    return "\n".join(lines)
+
+
+def select_assessment_tool_options(
+    text: str, options: list[AssessmentToolOption]
+) -> tuple[list[AssessmentToolOption], str | None]:
+    lowered = text.lower().strip()
+    if not lowered:
+        return [], render_assessment_tool_selection("current target", options)
+    if re.search(r"\b(all|everything|baseline|default|recommended)\b", lowered):
+        return options, None
+
+    selected_indexes: set[int] = set()
+    for value in re.findall(r"\b\d+\b", lowered):
+        index = int(value)
+        if 1 <= index <= len(options):
+            selected_indexes.add(index - 1)
+
+    aliases = {
+        "dns": "dns",
+        "dig": "dns",
+        "headers": "http-headers",
+        "header": "http-headers",
+        "http": "http-headers",
+        "curl": "http-headers",
+        "service": "service-scan",
+        "services": "service-scan",
+        "port": "service-scan",
+        "ports": "service-scan",
+        "nmap": "service-scan",
+        "fingerprint": "web-fingerprint",
+        "whatweb": "web-fingerprint",
+        "tls": "tls",
+        "ssl": "tls",
+        "sslscan": "tls",
+        "nikto": "web-misconfiguration",
+        "misconfiguration": "web-misconfiguration",
+        "nuclei": "template-scan",
+        "template": "template-scan",
+        "requested": "requested-check",
+        "custom": "requested-check",
+    }
+    wanted_ids = {aliases[token] for token in re.findall(r"[a-z][a-z0-9_-]*", lowered) if token in aliases}
+    for index, option in enumerate(options):
+        if option.id in wanted_ids or option.id in lowered or option.name.lower() in lowered:
+            selected_indexes.add(index)
+
+    if not selected_indexes:
+        prompt = render_assessment_tool_selection("current target", options)
+        return [], f"Choose at least one listed assessment tool before I run the assessment.\n\n{prompt}"
+    return [options[index] for index in sorted(selected_indexes)], None
+
+
+def assessment_check_for_tool_option(option: AssessmentToolOption) -> AssessmentCheck:
+    return AssessmentCheck(option.id, assessment_category_for_option(option.id), option.command)
+
+
+def assessment_category_for_option(option_id: str) -> str:
+    return {
+        "dns": "Discovery",
+        "http-headers": "HTTP",
+        "service-scan": "Network",
+        "web-fingerprint": "Web",
+        "tls": "TLS",
+        "web-misconfiguration": "Web",
+        "template-scan": "Web",
+        "requested-check": "Requested",
+    }.get(option_id, "Requested")
+
+
 def normalized_host(target: str) -> str:
     value = target.strip().removeprefix("https://").removeprefix("http://").split("/", 1)[0]
     return value.strip(".,;:")

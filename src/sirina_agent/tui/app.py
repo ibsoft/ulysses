@@ -40,11 +40,16 @@ from sirina_agent.core.artifacts import (
     should_store_large_paste,
 )
 from sirina_agent.core.assessment import (
+    AssessmentToolOption,
+    assessment_check_for_tool_option,
     AssessmentResult,
     assessment_checks,
+    assessment_tool_options,
     missing_tool_installer_script,
     missing_tool_packages,
     render_assessment_report,
+    render_assessment_tool_selection,
+    select_assessment_tool_options,
 )
 from sirina_agent.core.tasks import TaskStore, format_tasks, parse_recurring_prompt
 from sirina_agent.llm.openai_auth import OpenAIBrowserLogin, OpenAIBrowserLoginError
@@ -78,6 +83,8 @@ class RichTUI:
         self._last_response_wants_report = False
         self._assessment_project: AssessmentProject | None = None
         self._assessment_install_attempted = False
+        self._assessment_pending_tool_options: list[AssessmentToolOption] = []
+        self._assessment_pending_tool_target: str | None = None
         self._queued_input: str | None = None
         self.connectors = ConnectorManager.from_config(
             orchestrator.config,
@@ -157,6 +164,26 @@ class RichTUI:
                     except OSError as exc:
                         self.console.print(Panel(f"Report could not be opened: {exc}", title="Ulysses error"))
                 continue
+            if self._assessment_pending_tool_options:
+                selected, error = select_assessment_tool_options(text, self._assessment_pending_tool_options)
+                if error:
+                    self.console.print(Panel(error, title="Ulysses"))
+                    continue
+                target = self._assessment_pending_tool_target
+                self._assessment_pending_tool_options = []
+                self._assessment_pending_tool_target = None
+                if not self._assessment_project or not target:
+                    self.console.print(Panel("No active assessment target is available. Start a new assessment request.", title="Ulysses"))
+                    continue
+                self._last_user_text = text
+                self._last_response_wants_report = True
+                with self.console.status("[bold magenta]Ulysses is collecting assessment evidence...[/bold magenta]", spinner="dots"):
+                    answer = self._run_complete_assessment(target, selected_options=selected)
+                self.last_assistant_text = answer
+                self.console.print(Panel(answer, title="Ulysses"))
+                if self._should_speak_response(answer):
+                    self._speak(answer)
+                continue
             new_assessment = is_assessment_request(text)
             assessment_request = new_assessment or (
                 self._assessment_project is not None and is_assessment_continuation(text)
@@ -167,6 +194,18 @@ class RichTUI:
             if new_assessment:
                 self._assessment_project = self.artifacts.create_assessment_project(self.orchestrator.session_id, text)
                 self._assessment_install_attempted = False
+                self._assessment_pending_tool_options = []
+                self._assessment_pending_tool_target = None
+                target = assessment_target(text)
+                if target:
+                    direct_command = assessment_command_for_text(text, text)
+                    options = assessment_tool_options(target, direct_command)
+                    self._assessment_pending_tool_options = options
+                    self._assessment_pending_tool_target = target
+                    self._set_project_result_capture(self._assessment_project)
+                    self.console.print(f"Assessment project created: {self._assessment_project.path}")
+                    self.console.print(Panel(render_assessment_tool_selection(target, options), title="Ulysses"))
+                    continue
             self._set_project_result_capture(self._assessment_project)
             prompt_text = text
             if should_store_large_paste(text, self.orchestrator.config.context.max_chars):
@@ -223,10 +262,20 @@ class RichTUI:
         if self.orchestrator.mcp:
             self.orchestrator.mcp.stop()
 
-    def _run_complete_assessment(self, target: str, preferred_command: str | None = None) -> str:
+    def _run_complete_assessment(
+        self,
+        target: str,
+        preferred_command: str | None = None,
+        selected_options: list[AssessmentToolOption] | None = None,
+    ) -> str:
         assert self._assessment_project is not None
         results = []
-        for check in assessment_checks(target, preferred_command):
+        if selected_options is None:
+            options = assessment_tool_options(target, preferred_command)
+            self._assessment_pending_tool_options = options
+            self._assessment_pending_tool_target = target
+            return render_assessment_tool_selection(target, options)
+        for check in [assessment_check_for_tool_option(option) for option in selected_options]:
             self.orchestrator.sync_command_policy_from_config(force=True)
             result = self.orchestrator._run_skill_result("system_command", {"command": check.command})
             output = result.confirmation_prompt or result.content
