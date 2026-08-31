@@ -547,7 +547,7 @@ def test_trusted_sudo_password_reaches_only_command_runner(tmp_path):
     assert "modal-secret" not in repr(sessions.messages(agent.session_id))
 
 
-def test_godmode_reuses_cached_sudo_password_without_prompting(tmp_path):
+def test_godmode_sudo_always_prompts_even_with_cached_password(tmp_path):
     cfg = UlyssesConfig()
     cfg.skills.command.godmode = True
     sessions = SessionStore(tmp_path / "s.sqlite3")
@@ -579,9 +579,9 @@ def test_godmode_reuses_cached_sudo_password_without_prompting(tmp_path):
 
     result = agent._run_skill_result("system_command", {"command": "sudo id"})
 
-    assert result.ok
-    assert not result.requires_confirmation
-    assert received == {"password": "vault-secret"}
+    assert result.requires_confirmation
+    assert result.data["sudo_password_required"]
+    assert received == {}
     assert "vault-secret" not in repr(result)
 
 

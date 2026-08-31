@@ -474,8 +474,6 @@ class RichTUI:
                 persist_godmode(self.orchestrator.config_path, True)
                 self.orchestrator.config.skills.command.godmode = True
                 self.orchestrator.sync_command_policy_from_config(force=True)
-                password = Prompt.ask("sudo password (stored in the encrypted OS credential vault)", password=True)
-                self.orchestrator.store_godmode_sudo_password(password)
                 self.console.print("Godmode: on (saved and active)")
             else:
                 self.console.print(

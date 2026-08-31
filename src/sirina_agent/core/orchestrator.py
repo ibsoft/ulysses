@@ -663,13 +663,6 @@ class AgentOrchestrator:
             arguments.pop("sudo_password", None)
         if name == "system_command":
             self.sync_command_policy_from_config(force=False)
-            command = str(arguments.get("command", ""))
-            if self.config.skills.command.godmode and re.search(r"\bsudo\b", command):
-                cached_password = self.cached_godmode_sudo_password()
-                if cached_password:
-                    arguments = dict(arguments)
-                    arguments["sudo_password"] = cached_password
-                    trusted_sudo_password = True
         previous_skill = self.active_skill
         self.active_skill = name
         self._activity(f"using skill {name}")
@@ -789,11 +782,6 @@ class AgentOrchestrator:
         if sudo_password:
             result.content = result.content.replace(sudo_password, "<redacted>")
             result.data = self._redact_value(result.data, sudo_password)
-            if self.config.skills.command.godmode and result.ok:
-                try:
-                    self.store_godmode_sudo_password(sudo_password)
-                except Exception:
-                    pass
         if result.requires_confirmation:
             self.pending_tool = pending
             return result.confirmation_prompt or result.content

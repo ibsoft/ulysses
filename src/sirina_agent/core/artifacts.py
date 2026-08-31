@@ -246,6 +246,12 @@ def assessment_command_for_text(text: str, project_request: str) -> str | None:
     lowered = text.lower()
     target = assessment_target(text) or assessment_target(project_request)
 
+    wants_sudo_scan = any(term in lowered for term in ("sudo", "privileged", "syn", "root")) and any(
+        term in lowered for term in ("run", "scan", "nmap", "privileged", "syn")
+    )
+    if wants_sudo_scan and target:
+        return f"sudo nmap -sS -Pn -p- {target}"
+
     if target and "nikto" in lowered and any(term in lowered for term in ("run", "scan", "check", "test")):
         scan_target = target if target.startswith(("http://", "https://")) else f"https://{target}"
         return f"nikto -host {scan_target} -nointeractive"
@@ -262,11 +268,6 @@ def assessment_command_for_text(text: str, project_request: str) -> str | None:
         package = install.group(1)
         if package not in {"it", "tool", "tools", "package", "packages"}:
             return f"sudo apt-get install -y {package}"
-
-    wants_sudo_scan = "sudo" in lowered and any(term in lowered for term in ("run", "scan", "nmap", "privileged", "syn"))
-    if wants_sudo_scan:
-        if target:
-            return f"sudo nmap -sS -Pn -p- {target}"
     return None
 
 

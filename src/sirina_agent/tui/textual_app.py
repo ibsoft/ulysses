@@ -1575,22 +1575,6 @@ class UlyssesTextualApp(App):
         self._write_system(f"Godmode: {'on' if enabled else 'off'} (saved and active)")
         if credential_error:
             self._write_error(f"Godmode is off, but credential-vault cleanup could not be verified: {credential_error}")
-        if enabled:
-            self.push_screen(
-                SudoPasswordScreen("Enter your sudo password once. It will be encrypted in the OS credential vault."),
-                self._store_godmode_sudo_password,
-            )
-
-    def _store_godmode_sudo_password(self, password: str | None) -> None:
-        if password is None:
-            self._write_system("Godmode is on, but no sudo password was cached.")
-            return
-        try:
-            self.orchestrator.store_godmode_sudo_password(password)
-        except Exception as exc:
-            self._write_error(f"Secure sudo credential storage failed: {exc}")
-            return
-        self._write_system("Sudo password stored in the encrypted OS credential vault.")
 
     def _mcp_command(self, parts: list[str]) -> None:
         manager = self.orchestrator.mcp

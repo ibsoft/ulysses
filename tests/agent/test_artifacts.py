@@ -174,6 +174,8 @@ def test_assessment_command_for_install_and_sudo_scan():
 
     assert assessment_command_for_text("install nikto", request) == "sudo apt-get install -y nikto"
     assert assessment_command_for_text("run with sudo", request) == "sudo nmap -sS -Pn -p- www.unixfor.gr"
+    assert assessment_command_for_text("run a SYN scan", request) == "sudo nmap -sS -Pn -p- www.unixfor.gr"
+    assert assessment_command_for_text("do the privileged port scan", request) == "sudo nmap -sS -Pn -p- www.unixfor.gr"
     assert assessment_command_for_text("run nikto on www.unixfor.gr", request) == "nikto -host https://www.unixfor.gr -nointeractive"
     assert assessment_command_for_text("run nmap on www.unixfor.gr", request) == "nmap -sT -Pn --top-ports 1000 www.unixfor.gr"
 
