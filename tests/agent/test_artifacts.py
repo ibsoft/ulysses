@@ -11,6 +11,8 @@ from sirina_agent.core.artifacts import (
     should_attach_clipboard_text,
     should_store_large_paste,
 )
+from sirina_agent.core.assessment import assessment_tool_options
+from sirina_agent.tui.textual_app import _selected_assessment_options
 
 
 def test_large_paste_is_saved_as_txt(tmp_path):
@@ -186,3 +188,19 @@ def test_assessment_baseline_commands_are_concrete_and_safe():
     assert any(command.startswith("nuclei -u ") for command in commands)
     assert not any(command.startswith("sudo ") for command in commands)
     assert not any("apt-get" in command for command in commands)
+
+
+def test_assessment_tool_selection_accepts_numbers_names_and_all():
+    options = assessment_tool_options("www.unixfor.gr")
+
+    selected, error = _selected_assessment_options("1, nmap, tls", options)
+    assert error is None
+    assert [item.id for item in selected] == ["dns", "service-scan", "tls"]
+
+    selected, error = _selected_assessment_options("all", options)
+    assert error is None
+    assert selected == options
+
+    selected, error = _selected_assessment_options("maybe later", options)
+    assert selected == []
+    assert error and "Choose at least one listed assessment tool" in error

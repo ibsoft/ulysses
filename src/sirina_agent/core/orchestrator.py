@@ -129,9 +129,10 @@ class AgentOrchestrator:
     def _handle_text_locked(self, text: str) -> str:
         self._activity("checking request")
         confirmation = text.strip().lower()
-        if self.pending_tool and confirmation in {"yes", "y", "confirm", "confirmed", "proceed", "go ahead"}:
+        pending_tool = getattr(self, "pending_tool", None)
+        if pending_tool and confirmation in {"yes", "y", "confirm", "confirmed", "proceed", "go ahead"}:
             return self._confirm_pending_tool_locked()
-        if self.pending_tool and confirmation in {"no", "n", "cancel", "stop", "abort"}:
+        if pending_tool and confirmation in {"no", "n", "cancel", "stop", "abort"}:
             self.cancel_pending_tool()
             return "Pending command cancelled."
         direct_skill = self._direct_skill_creation(text)
@@ -238,7 +239,8 @@ class AgentOrchestrator:
                 message,
                 tool_calls,
                 tools,
-                compact_command_completion=external_network_task,
+            compact_command_completion=external_network_task
+            and all((call.get("function") or {}).get("name") == "system_command" for call in tool_calls),
             )
             if subagent_reports:
                 self.subagents.mark_reported([item["id"] for item in subagent_reports])
@@ -958,7 +960,7 @@ class AgentOrchestrator:
             )
             device = str(getattr(summarizer, "device", "local"))
             self._activity(f"summarizing response locally ({device})")
-            summary = summarizer.summarize(safe_text)
+            summary = summarizer.summarize(_voice_summary_input(safe_text, cfg.voice_summary_max_input_tokens))
             if summary:
                 self._activity("preparing summarized voice playback")
                 return _clip_sentence("Summary: " + summary, cfg.voice_summary_max_chars)
@@ -1261,3 +1263,12 @@ class AgentOrchestrator:
         metadata["last_autonomous_report_at"] = now.isoformat()
         self.sessions.update_session_metadata(self.session_id, metadata)
         return note
+
+
+def _voice_summary_input(text: str, max_input_tokens: int) -> str:
+    budget = max(1000, int(max_input_tokens) * 4)
+    if len(text) <= budget:
+        return text
+    head = text[: budget // 2].rstrip()
+    tail = text[-(budget - len(head)) :].lstrip()
+    return f"{head}\n\n[...]\n\n{tail}"

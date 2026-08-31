@@ -2,6 +2,7 @@ from sirina_agent.core.assessment import (
     AssessmentCheck,
     AssessmentResult,
     assessment_checks,
+    assessment_tool_options,
     missing_tool_installer_script,
     missing_tool_packages,
     render_assessment_report,
@@ -26,6 +27,16 @@ def test_complete_baseline_has_real_security_checks():
         "template-scan",
     }
     assert all("/path" not in check.command for check in checks)
+
+
+def test_assessment_tool_options_present_operator_choice_details():
+    options = assessment_tool_options("www.example.com", "custom-scanner www.example.com")
+
+    assert options[0].name == "DNS lookup"
+    assert options[0].purpose
+    assert options[0].command == "dig +short www.example.com"
+    assert options[-1].id == "requested-check"
+    assert options[-1].command == "custom-scanner www.example.com"
 
 
 def test_customer_report_excludes_internal_execution_failures():

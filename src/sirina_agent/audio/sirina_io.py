@@ -208,6 +208,8 @@ def _clean_spoken_text(text: str) -> str:
 
 def _remove_unsafe_speech_content(text: str) -> str:
     """Remove code and switch-heavy commands from voice output, not the transcript."""
+    text = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+    text = re.sub(r"~~~.*?~~~", "", text, flags=re.DOTALL)
     safe_lines: list[str] = []
     in_fence = False
     for line in text.splitlines():

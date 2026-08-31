@@ -29,6 +29,14 @@ class AssessmentFinding:
     remediation: str
 
 
+@dataclass(frozen=True)
+class AssessmentToolOption:
+    id: str
+    name: str
+    purpose: str
+    command: str
+
+
 TOOL_PACKAGES = {
     "curl": "curl",
     "dig": "dnsutils",
@@ -37,6 +45,18 @@ TOOL_PACKAGES = {
     "sslscan": "sslscan",
     "nikto": "nikto",
     "nuclei": "nuclei",
+}
+
+
+TOOL_PURPOSES = {
+    "dns": ("DNS lookup", "Resolve the target and capture externally visible DNS evidence."),
+    "http-headers": ("HTTP headers", "Collect response headers for security-control and platform observations."),
+    "service-scan": ("Nmap service scan", "Identify exposed TCP services and light version evidence."),
+    "web-fingerprint": ("WhatWeb fingerprint", "Fingerprint web technologies and server-side components."),
+    "tls": ("TLS review", "Collect TLS certificate and protocol configuration evidence."),
+    "web-misconfiguration": ("Nikto web checks", "Check for common web-server misconfigurations."),
+    "template-scan": ("Nuclei template scan", "Run non-interactive signature checks for known web exposures."),
+    "requested-check": ("Requested check", "Run the operator-requested assessment command."),
 }
 
 
@@ -59,6 +79,14 @@ def assessment_checks(target: str, preferred_command: str | None = None) -> list
     if preferred_command and preferred_command not in {check.command for check in checks}:
         checks.append(AssessmentCheck("requested-check", "Requested", preferred_command))
     return checks
+
+
+def assessment_tool_options(target: str, preferred_command: str | None = None) -> list[AssessmentToolOption]:
+    options = []
+    for check in assessment_checks(target, preferred_command):
+        name, purpose = TOOL_PURPOSES.get(check.id, (check.id, f"Collect {check.category.lower()} assessment evidence."))
+        options.append(AssessmentToolOption(check.id, name, purpose, check.command))
+    return options
 
 
 def normalized_host(target: str) -> str:

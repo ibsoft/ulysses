@@ -56,7 +56,9 @@ from sirina_agent.core.artifacts import (
 from sirina_agent.core.assessment import (
     AssessmentCheck,
     AssessmentResult,
+    AssessmentToolOption,
     assessment_checks,
+    assessment_tool_options,
     missing_tool_installer_script,
     missing_tool_packages,
     render_assessment_report,
@@ -729,6 +731,8 @@ class UlyssesTextualApp(App):
         self._assessment_install_attempted = False
         self._assessment_resume_target: str | None = None
         self._assessment_pending_check: AssessmentCheck | None = None
+        self._assessment_pending_tool_options: list[AssessmentToolOption] = []
+        self._assessment_pending_tool_target: str | None = None
         self._assessment_results: list[AssessmentResult] = []
         self._assessment_completed_commands: set[str] = set()
         self._pending_paste: tuple[str, Artifact, str] | None = None
@@ -1013,6 +1017,29 @@ class UlyssesTextualApp(App):
             and not self.orchestrator.pending_tool_requires_sudo_password()
         ):
             self.orchestrator.pending_tool = None
+        if self._assessment_pending_tool_options:
+            self._last_user_text = original_text
+            self._last_response_wants_report = True
+            self._write_user(display_text)
+            target = self._assessment_pending_tool_target
+            options = list(self._assessment_pending_tool_options)
+            selected, error = _selected_assessment_options(original_text, options)
+            if error:
+                self._write_system(error)
+                return
+            self._assessment_pending_tool_options = []
+            self._assessment_pending_tool_target = None
+            if not self._assessment_project or not target:
+                self._write_system("No active assessment target is available. Start a new assessment request.")
+                return
+            self._refresh_status()
+            self._start_waiting()
+            Thread(
+                target=self._assessment_baseline_in_thread,
+                args=(self._assessment_project, target, None, selected),
+                daemon=True,
+            ).start()
+            return
         if new_assessment:
             self._assessment_project = self.artifacts.create_assessment_project(
                 self.orchestrator.session_id, original_text
@@ -1020,6 +1047,8 @@ class UlyssesTextualApp(App):
             self._assessment_install_attempted = False
             self._assessment_resume_target = None
             self._assessment_pending_check = None
+            self._assessment_pending_tool_options = []
+            self._assessment_pending_tool_target = None
             self._assessment_results = []
             self._assessment_completed_commands = set()
         self._set_project_result_capture(self._assessment_project)
@@ -1057,6 +1086,11 @@ class UlyssesTextualApp(App):
                 self._write_user(display_text)
                 if new_assessment:
                     self._write_system(f"Assessment project created:\n{self._assessment_project.path}")
+                    options = assessment_tool_options(target, direct_command)
+                    self._assessment_pending_tool_options = options
+                    self._assessment_pending_tool_target = target
+                    self._write_system(_assessment_tool_selection_prompt(target, options))
+                    return
                 self._refresh_status()
                 self._start_waiting()
                 Thread(
@@ -1170,8 +1204,13 @@ class UlyssesTextualApp(App):
         project: AssessmentProject,
         target: str,
         preferred_command: str | None = None,
+        selected_options: list[AssessmentToolOption] | None = None,
     ) -> None:
-        checks = assessment_checks(target, preferred_command)
+        checks = (
+            [AssessmentCheck(option.id, _assessment_category_for_option(option.id), option.command) for option in selected_options]
+            if selected_options is not None
+            else assessment_checks(target, preferred_command)
+        )
         results = list(self._assessment_results)
         for check in checks:
             if check.command in self._assessment_completed_commands:
@@ -2774,6 +2813,82 @@ def _active_command_policy(orchestrator):
 
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _assessment_tool_selection_prompt(target: str, options: list[AssessmentToolOption]) -> str:
+    lines = [
+        f"Assessment target: {target}",
+        "Available assessment tools. Choose which Ulysses may use before evidence collection starts:",
+    ]
+    for index, option in enumerate(options, start=1):
+        lines.append(f"{index}. {option.name} [{option.id}]")
+        lines.append(f"   Purpose: {option.purpose}")
+        lines.append(f"   Command: {option.command}")
+    lines.append("Reply with `all`, numbers such as `1,3,5`, or tool names such as `nmap tls nuclei`.")
+    return "\n".join(lines)
+
+
+def _selected_assessment_options(
+    text: str, options: list[AssessmentToolOption]
+) -> tuple[list[AssessmentToolOption], str | None]:
+    lowered = text.lower().strip()
+    if not lowered:
+        return [], _assessment_tool_selection_prompt("current target", options)
+    if re.search(r"\b(all|everything|baseline|default|recommended)\b", lowered):
+        return options, None
+
+    selected_indexes: set[int] = set()
+    for value in re.findall(r"\b\d+\b", lowered):
+        index = int(value)
+        if 1 <= index <= len(options):
+            selected_indexes.add(index - 1)
+
+    aliases = {
+        "dns": "dns",
+        "dig": "dns",
+        "headers": "http-headers",
+        "header": "http-headers",
+        "http": "http-headers",
+        "curl": "http-headers",
+        "service": "service-scan",
+        "services": "service-scan",
+        "port": "service-scan",
+        "ports": "service-scan",
+        "nmap": "service-scan",
+        "fingerprint": "web-fingerprint",
+        "whatweb": "web-fingerprint",
+        "tls": "tls",
+        "ssl": "tls",
+        "sslscan": "tls",
+        "nikto": "web-misconfiguration",
+        "misconfiguration": "web-misconfiguration",
+        "nuclei": "template-scan",
+        "template": "template-scan",
+        "requested": "requested-check",
+        "custom": "requested-check",
+    }
+    wanted_ids = {aliases[token] for token in re.findall(r"[a-z][a-z0-9_-]*", lowered) if token in aliases}
+    for index, option in enumerate(options):
+        if option.id in wanted_ids or option.id in lowered or option.name.lower() in lowered:
+            selected_indexes.add(index)
+
+    if not selected_indexes:
+        prompt = _assessment_tool_selection_prompt("current target", options)
+        return [], f"Choose at least one listed assessment tool before I run the assessment.\n\n{prompt}"
+    return [options[index] for index in sorted(selected_indexes)], None
+
+
+def _assessment_category_for_option(option_id: str) -> str:
+    return {
+        "dns": "Discovery",
+        "http-headers": "HTTP",
+        "service-scan": "Network",
+        "web-fingerprint": "Web",
+        "tls": "TLS",
+        "web-misconfiguration": "Web",
+        "template-scan": "Web",
+        "requested-check": "Requested",
+    }.get(option_id, "Requested")
 
 
 def _run_system_command_capture(orchestrator, command: str) -> tuple[str, bool]:
